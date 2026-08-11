@@ -1,9 +1,14 @@
-# 验收重放框架（v1 build 12）
+# 验收重放框架（v1 build 12 起；build 14 = 主用例 + 13 服务用例矩阵 + 全量验收）
 
 spec §5 测试决策**主 seam** 的落地：官方 go-sdk 客户端打自己的网关——HTTP
 （Streamable HTTP + bearer）与 stdio（拉起 `dgw serve-stdio`）双形态真实
 MCP 往返；用例按序重放 → 判定三件套逐项断言 → 报告留档（30min demo 与
 团队评审用）。只测外部行为（工具协议层）、不测实现细节（spec §5 测试哲学）。
+
+build 14 起验收环境带语义数据（run.sh semantic-sync 同步 samples/semantic
+进运行时）与矩阵 fixture（fixture.sql），用例 52 条 = 主用例 + 13 服务
+矩阵（39 例）+ 负向/边界 5 例 + 正向基础例；人读清单见
+docs/acceptance-cases.md。
 
 ## 一次运行
 
@@ -12,13 +17,17 @@ cd deploy/accept
 ./run.sh
 ```
 
-`run.sh` 全自动编排（约 3-5 分钟，取决于镜像拉取）：
+`run.sh` 全自动编排（约 5-8 分钟，取决于镜像拉取）：
 
 1. 起 demo 主从 PG（独立 compose project `dgw-accept`，与 demo 栈隔离；
    镜像拉不下来时 `DGW_PG_REGISTRY=docker.1ms.run/library ./run.sh`）
-2. 建库建表 + 演示数据（orders 600 / big_events 6000 / iam.users）+ 真实
-   provisioning（`deploy/provisioning/readonly-role.sql`，共享只读角色）
-3. 凭据/授权：dev-alice（主用户）/ ghost（无 grants）/ p1-p5（并发探测）
+2. 建 10 个持库 + 演示数据（orders 600 / big_events 6000 / iam.users）+
+   矩阵 fixture（fixture.sql：13 服务矩阵用例的表与确定性数据）+ 真实
+   provisioning（`deploy/provisioning/readonly-role.sql`，共享只读角色，
+   `GRANT SELECT ON ALL TABLES` 一次覆盖 fixture 表）
+3. 凭据/授权：dev-alice（主用户 + 矩阵 27 表）/ ghost（无 grants）/ p1-p5
+   （并发探测）；语义数据同步（semantic-sync samples/semantic → 运行时；
+   主用例检索/口径 dry-run 依赖；无向量通道 = 纯关键词检索，确定性）
 4. 硬上限配置边界：`DGW_SQL_LIMIT=5001` 拒启（§4.9「不可配置超过」）
 5. **HTTP 形态**（限 500）：用例重放 + 三件套 + JSONL 重放复现
 6. **stdio 形态**（限 5000）：用例重放 + 三件套 + JSONL 重放复现（trunc-002
@@ -29,9 +38,10 @@ cd deploy/accept
 
 | 文件 | 说明 |
 |---|---|
-| `cases.yaml` | 用例定义（工具调用 + 期望断言）；build 14 的 13 服务用例矩阵只增条目 |
+| `cases.yaml` | 用例定义（工具调用 + 期望断言）；build 14 = 主用例 + 13 服务矩阵 + 负向/边界 |
+| `fixture.sql` | 矩阵 fixture（build 14）：10 个持库的真实表名 + 确定性数据（相对 now()） |
 | `accept.go` | 重放 harness（官方 go-sdk 客户端；断言与报告；不含业务断言逻辑） |
-| `run.sh` | 编排：PG 拉起 → 网关拉起（双形态）→ 重放 → 三件套 → 报告 |
+| `run.sh` | 编排：PG 拉起 → fixture + provisioning → 语义同步 → 授权 → 网关拉起（双形态）→ 重放 → 三件套 → 报告 |
 | `reports/` | 报告留档（gitignore；每次运行按时间戳归档） |
 
 ## 判定三件套（spec §6.4）
@@ -56,7 +66,7 @@ cd deploy/accept
 | `neg-002` 非 SELECT 拒绝 | DML/DDL/COPY/utility 六句 → `invalid_request`/`non_select`（AST 分类拒绝） |
 | `trunc-001/002` LIMIT 截断 | >500 截断（HTTP 网关不设 DGW_SQL_LIMIT，走 §4.9 默认值路径）+ >5000 硬上限（stdio 限 5000）+ truncated 标记 + 有界查询 psql 对照；配置 5001 拒启 |
 | `conc-001/002` 并发超限 | 同 key >2 / 进程级 >8 → `rate_limited`（key/process_concurrency_limit），不排队快速失败（`reject_within_ms` 断言被拒调用毫秒级返回；慢查询持闸 2s 保证窗口内确定性） |
-| `neg-005` 无指标原料路径 | 无现成指标（search 零命中）→ 走表/列原料路径直查成功产出结果 |
+| `neg-005` 无指标原料路径 | 无现成指标（search 零命中）→ 走表/列原料路径直查成功产出结果。build 14 换「无指标领域」fixture：验收环境带语义数据后「支付失败」已是指标；改查退款域（metrics.yaml 仅 payment_failure_rate 一个指标，`search_entities(type=metric, 退款)` 零命中）→ 直查 refund_orders 成功。隔离策略 = 依赖「退款域无指标」的 fixture 事实（新增退款指标时需换域），不依赖全局空存储 |
 
 ## 形态覆盖
 
@@ -64,6 +74,16 @@ stdio = 单 key 单进程（`serve-stdio` 的架构约束）：多身份用例�
 进程级并发）仅 HTTP；其余用例双形态覆盖。并发用例标记 `replay_skip`
 （顺序重放无法复现并发拒绝——闸在时间窗口内饱和；执行记录仍在链上，
 完整性照查）。
+
+## 主用例与 13 服务矩阵（build 14）
+
+- 主用例「昨天支付失败率为什么上涨」= cases.yaml `main-001`（5 步流程，
+  详见 docs/acceptance-cases.md §1）；
+- 13 服务矩阵 = 10 个持库服务 × 3 条 execute_sql 用例 + 3 个无持库服务
+  × 3 条语义元数据用例（服务实体可达 + 拓扑如实，口径见清单 §2.3）；
+- 复杂用例覆盖校验层硬路径：CTE/子查询的 AST 分类与授权展开
+  （bill-003 / audit-003 / main-001 步骤 5 等）；
+- 全部成功 SQL 用例 `psql_compare: true`（三件套 (a) 数字一致）。
 
 ## 方案取舍（为何不是其他形态）
 
@@ -79,16 +99,22 @@ stdio = 单 key 单进程（`serve-stdio` 的架构约束）：多身份用例�
 承接（用例重放 + 三件套 + 报告）。两者共用同一 go-sdk 客户端接线（bearer
 transport 三行样板，不抽公共包——demo 与验收是不同目录的独立 main）。
 
-## 加用例（build 14 矩阵）
+## 加用例（build 14 矩阵已落地）
 
 编辑 `cases.yaml` 增条目即可，harness 不改。字段见文件头注释；要点：
 
 - `modes: [http, stdio]` 双形态 / `[http]` 仅 HTTP；
 - execute_sql 成功用例加 `psql_compare: true` 自动对照；
 - 语义结果用 `paths: [{path: total, eq: 0}]` 做 JSON 路径断言；
-- 多语句同期望用 `sqls`；流程用 `steps`；并发用 `concurrency` + `keys`。
+- 多语句同期望用 `sqls`；流程用 `steps`；并发用 `concurrency` + `keys`；
+- 新表用例：先在 `fixture.sql` 建表（public schema + 相对 now() 的确定性
+  数据），run.sh 授权列表补 FQN，语义数据里需有对应表实体（否则授权
+  warnStaleGrants 告警）；
+- 时间窗口用例统一 `[date_trunc('day', now()) - N day, date_trunc('day', now()))`
+  半开区间（排除今日，跨天重跑窗口自动前移）。
 
-用例兼作 golden 语料（09 采集回归复用，spec §6.2）。
+用例兼作 golden 语料（09 采集回归复用，spec §6.2；契约见
+docs/acceptance-cases.md §5）。
 
 ## 手动分段跑
 

@@ -1,10 +1,10 @@
-# v1 验收用例（build 12：负向/边界 5 例 + 正向基础例；spec §5 测试决策主
-# seam、§6.3 负向/边界、§6.4 判定三件套、§6.5 执行方式）。
+# v1 验收用例（build 12：负向/边界 5 例 + 正向基础例；build 14：主用例 +
+# 13 服务用例矩阵；spec §5 测试决策主 seam、§6.1-§6.5）。
 #
 # 只测外部行为（spec §5 测试哲学：不测实现细节）：用例 = 工具调用 + 期望
 # 断言，经官方 go-sdk 客户端打网关（HTTP + stdio 双形态真实 MCP 往返）。
-# 13 服务用例矩阵（§6.2，39+ 例）在 build 14 扩展——本文件即那个矩阵的
-# 框架，build 14 只增用例不改 harness。
+# 用例兼作 golden 语料（09 采集回归复用，docs/acceptance-cases.md 记录
+# 复用契约）。
 #
 # 字段：
 #   id/name      稳定标识 + 一句话描述（报告与执行记录关联）
@@ -15,7 +15,7 @@
 #   keys         并发用例的 key 列表（每个 key 发 concurrency 个调用）
 #   concurrency  并发调用数（>1 = 并发用例：独立会话同时发出，不排队验证）
 #   sqls         同期望的多语句列表（非 SELECT 拒绝集；每句一条调用）
-#   steps        流程用例步骤（无指标原料路径等）；每步 = {tool, args, expect}
+#   steps        流程用例步骤（主用例 / 无指标原料路径）；每步 = {tool, args, expect}
 #   replay_skip  并发用例标记：顺序重放无法复现并发拒绝（闸在时间窗口内
 #                饱和），重放时跳过状态比对（执行记录仍在链上）
 #   expect       期望断言：
@@ -69,6 +69,623 @@ cases:
       rows: 3
       truncated: false
       psql_compare: true
+
+  # ── §6.1 主用例「昨天支付失败率为什么上涨」全流程（build 14）──────────
+  # Agent 自由组合（不预设 SQL）：双入口定位 → 口径 + 带时间参数 dry-run
+  # 展开 → 昨日趋势 → 下钻归因（多表 join + 窗口函数 + 时间窗口 + CTE，
+  # 覆盖校验层硬路径）。
+  # 数据故事（fixture.sql）：此前 13 天失败率 3/60 = 5%，昨日 43/100 =
+  # 43% 激增——失败集中 channel=5 银行转账。趋势/归因 SQL 用相对时间窗口
+  # （昨天 = date_trunc('day', now()) - interval '1 day'），重放同日可复现。
+  # dry-run 断言用固定窗口（2026-08-11T00:00:00Z → 08-12）：展开是纯函数，
+  # 固定入参 = 确定性输出，精确断言展开 SQL 全文（口径改动即用例失败）。
+  - id: main-001
+    name: 主用例——昨天支付失败率为什么上涨（搜索→口径→趋势→下钻归因）
+    modes: [http, stdio]
+    key: dev-alice
+    steps:
+      - tool: search_entities
+        args:
+          query: "支付失败"
+        expect:
+          status: success
+          paths:
+            - path: total
+              eq: 2
+      - tool: search_entities
+        args:
+          query: "支付失败"
+          type: metric
+        expect:
+          status: success
+          paths:
+            - path: total
+              eq: 1
+            - path: hits[0].fqn
+              eq: payment_failure_rate
+      - tool: get_metric_definition
+        args:
+          fqn: payment_failure_rate
+          time_range:
+            start: "2026-08-11T00:00:00Z"
+            end: "2026-08-12T00:00:00Z"
+        expect:
+          status: success
+          paths:
+            - path: time_applied
+              eq: true
+            - path: tables[0]
+              eq: bss-wallet.wallet.payment_orders
+            - path: dry_run_sql
+              eq: "SELECT COUNT(*) FILTER (WHERE status = 4)::numeric / NULLIF(COUNT(*), 0) AS payment_failure_rate FROM payment_orders WHERE payment_orders.created_at >= '2026-08-11T00:00:00Z' AND payment_orders.created_at < '2026-08-12T00:00:00Z'"
+      - tool: execute_sql
+        args:
+          sql: "SELECT date_trunc('day', created_at)::date AS d, count(*) FILTER (WHERE status = 4)::numeric / NULLIF(count(*), 0) AS failure_rate FROM payment_orders WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+          dbname: wallet
+        expect:
+          status: success
+          rows: 7
+          truncated: false
+          psql_compare: true
+      - tool: execute_sql
+        args:
+          sql: "WITH daily AS (SELECT date_trunc('day', p.created_at)::date AS d, p.channel, count(*) FILTER (WHERE p.status = 4) AS failed, count(*) AS total FROM payment_orders p JOIN wallet_accounts a ON p.org_id = a.org_id WHERE p.created_at >= date_trunc('day', now()) - interval '3 day' AND p.created_at < date_trunc('day', now()) GROUP BY 1, 2) SELECT d, channel, failed, total, failed::numeric / NULLIF(total, 0) AS rate, failed - lag(failed) OVER (PARTITION BY channel ORDER BY d) AS delta FROM daily ORDER BY d, channel"
+          dbname: wallet
+        expect:
+          status: success
+          rows: 8
+          truncated: false
+          psql_compare: true
+
+  # ── §6.2 每服务用例矩阵（13 服务 × ≥2 简单 + ≥1 复杂，39 例；build 14）
+  # 10 个持库服务 = execute_sql 用例（fixture.sql 伪造数据）；3 个无持库
+  # 服务（聚合/编排/采集角色）= 语义元数据用例（服务实体可达 + 拓扑如
+  # 实，docs/acceptance-cases.md 记录口径）。全部复杂用例 = 多表 join/
+  # 窗口函数/时间窗口，并覆盖校验层硬路径（子查询/CTE 的 AST 分类与
+  # 授权展开：bill-003/main-001 用 CTE，audit-003/main-001 用子查询）。
+  #
+  # ── bss-bill（db=bill）────────────────────────────────────────────────
+  - id: bill-001
+    name: bss-bill 简单——账单时间窗口聚合（近 7 日按天 sum(bill_amount)）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', request_started_at)::date AS d, sum(bill_amount) AS total FROM bills WHERE request_started_at >= date_trunc('day', now()) - interval '7 day' AND request_started_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: bill
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+  - id: bill-002
+    name: bss-bill 简单——结算批次枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM settlement_batches GROUP BY status ORDER BY status"
+      dbname: bill
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: bill-003
+    name: bss-bill 复杂——结算扣费失败归因（CTE + LEFT JOIN + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "WITH attempts AS (SELECT settlement_batch_id, count(*) FILTER (WHERE status = 'failed') AS failed FROM settlement_attempts GROUP BY settlement_batch_id) SELECT b.status, count(*) AS batches, coalesce(sum(a.failed), 0) AS failed_attempts FROM settlement_batches b LEFT JOIN attempts a ON b.settlement_batch_id = a.settlement_batch_id WHERE b.settlement_cycle_started_at >= date_trunc('day', now()) - interval '7 day' AND b.settlement_cycle_started_at < date_trunc('day', now()) GROUP BY b.status ORDER BY b.status"
+      dbname: bill
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+
+  # ── bss-wallet（db=wallet）────────────────────────────────────────────
+  - id: wallet-001
+    name: bss-wallet 简单——支付单枚举状态过滤聚合（status 2/4）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM payment_orders GROUP BY status ORDER BY status"
+      dbname: wallet
+    expect:
+      status: success
+      rows: 2
+      truncated: false
+      psql_compare: true
+  - id: wallet-002
+    name: bss-wallet 简单——钱包流水按 tx_type 聚合（时间窗口内）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT tx_type, sum(amount) AS total FROM wallet_transactions WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY tx_type ORDER BY tx_type"
+      dbname: wallet
+    expect:
+      status: success
+      rows: 5
+      truncated: false
+      psql_compare: true
+  - id: wallet-003
+    name: bss-wallet 复杂——退款归因（退款单 JOIN 支付单 + 金额聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT p.status, count(*) AS refunds, sum(r.amount)::numeric(12,2) AS refund_amount FROM refund_orders r JOIN payment_orders p ON r.payment_order_id = p.order_id WHERE r.created_at >= date_trunc('day', now()) - interval '3 day' AND r.created_at < date_trunc('day', now()) GROUP BY p.status ORDER BY p.status"
+      dbname: wallet
+    expect:
+      status: success
+      rows: 2
+      truncated: false
+      psql_compare: true
+
+  # ── bss-invoice（db=bss_invoice）──────────────────────────────────────
+  - id: invoice-001
+    name: bss-invoice 简单——开票申请枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM invoice_applications GROUP BY status ORDER BY status"
+      dbname: bss_invoice
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: invoice-002
+    name: bss-invoice 简单——开票申请时间窗口聚合（近 7 日按天）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', created_at)::date AS d, count(*) AS n FROM invoice_applications WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: bss_invoice
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+  - id: invoice-003
+    name: bss-invoice 复杂——开票链路（申请 LEFT JOIN 发票 LEFT JOIN 文件 + 聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT a.status, count(DISTINCT t.tax_invoice_id) AS invoices, count(DISTINCT f.file_id) AS files FROM invoice_applications a LEFT JOIN tax_invoices t ON a.application_id = t.application_id LEFT JOIN invoice_files f ON a.application_id = f.application_id WHERE a.created_at >= date_trunc('day', now()) - interval '7 day' AND a.created_at < date_trunc('day', now()) GROUP BY a.status ORDER BY a.status"
+      dbname: bss_invoice
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+
+  # ── bss-subscription（db=subscription）────────────────────────────────
+  - id: sub-001
+    name: bss-subscription 简单——模型定价按模型×计量项聚合（近 7 日生效）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT model, meter, count(*) AS n, max(amount) AS max_amount FROM model_pricing WHERE effective_from >= date_trunc('day', now()) - interval '7 day' AND effective_from < date_trunc('day', now()) GROUP BY model, meter ORDER BY model, meter"
+      dbname: subscription
+    expect:
+      status: success
+      rows: 8
+      truncated: false
+      psql_compare: true
+  - id: sub-002
+    name: bss-subscription 简单——30 日生效定价计数（单行聚合）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT count(*) AS n FROM model_pricing WHERE effective_from >= date_trunc('day', now()) - interval '30 day' AND effective_from < date_trunc('day', now())"
+      dbname: subscription
+    expect:
+      status: success
+      rows: 1
+      truncated: false
+      psql_compare: true
+  - id: sub-003
+    name: bss-subscription 复杂——档位策略（明细 JOIN 版本 + 聚合）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT v.version, count(*) AS items, max(i.required_score) AS max_score FROM tier_policy_items i JOIN tier_policy_versions v ON i.policy_version_id = v.id GROUP BY v.version ORDER BY v.version"
+      dbname: subscription
+    expect:
+      status: success
+      rows: 2
+      truncated: false
+      psql_compare: true
+
+  # ── bss-promotion（db=promotion）──────────────────────────────────────
+  - id: promo-001
+    name: bss-promotion 简单——兑换记录枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM code_redemptions GROUP BY status ORDER BY status"
+      dbname: promotion
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: promo-002
+    name: bss-promotion 简单——兑换码枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM codes GROUP BY status ORDER BY status"
+      dbname: promotion
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: promo-003
+    name: bss-promotion 复杂——兑换失败归因（记录 JOIN 码 JOIN 批次 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT b.name, count(*) AS redemptions, count(*) FILTER (WHERE r.status = 'failed') AS failed FROM code_redemptions r JOIN codes c ON r.code_id = c.code_id JOIN code_batches b ON c.batch_id = b.batch_id WHERE r.created_at >= date_trunc('day', now()) - interval '7 day' AND r.created_at < date_trunc('day', now()) GROUP BY b.name ORDER BY b.name"
+      dbname: promotion
+    expect:
+      status: success
+      rows: 6
+      truncated: false
+      psql_compare: true
+
+  # ── iam（db=iam）──────────────────────────────────────────────────────
+  - id: iam-001
+    name: iam 简单——组织枚举状态聚合（active/frozen/cancelling 三态）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM organizations GROUP BY status ORDER BY status"
+      dbname: iam
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: iam-002
+    name: iam 简单——组织创建时间窗口聚合（近 7 日按天）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', created_at)::date AS d, count(*) AS n FROM organizations WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: iam
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+  - id: iam-003
+    name: iam 复杂——组织成员归因（成员 JOIN 组织 + 类型聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT o.organization_type, count(*) AS members FROM organization_memberships m JOIN organizations o ON m.organization_id = o.organization_id WHERE m.joined_at >= date_trunc('day', now()) - interval '7 day' AND m.joined_at < date_trunc('day', now()) GROUP BY o.organization_type ORDER BY o.organization_type"
+      dbname: iam
+    expect:
+      status: success
+      rows: 2
+      truncated: false
+      psql_compare: true
+
+  # ── iam-audit（db=iam_audit）──────────────────────────────────────────
+  - id: audit-001
+    name: iam-audit 简单——近 1 日审计日志事件类型聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT event_type, count(*) AS n FROM audit_logs WHERE occurred_at >= date_trunc('day', now()) - interval '1 day' AND occurred_at < date_trunc('day', now()) GROUP BY event_type ORDER BY event_type"
+      dbname: iam_audit
+    expect:
+      status: success
+      rows: 2
+      truncated: false
+      psql_compare: true
+  - id: audit-002
+    name: iam-audit 简单——审计导出枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM audit_exports GROUP BY status ORDER BY status"
+      dbname: iam_audit
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: audit-003
+    name: iam-audit 复杂——审计量趋势（子查询 + 窗口函数 lag + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT d, total, total - lag(total) OVER (ORDER BY d) AS delta FROM (SELECT date_trunc('day', occurred_at)::date AS d, count(*) AS total FROM audit_logs WHERE occurred_at >= date_trunc('day', now()) - interval '7 day' AND occurred_at < date_trunc('day', now()) GROUP BY 1) t ORDER BY d"
+      dbname: iam_audit
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+
+  # ── console（db=console）──────────────────────────────────────────────
+  - id: console-001
+    name: console 简单——审批实例 execute_status 聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT execute_status, count(*) AS n FROM approval_cases GROUP BY execute_status ORDER BY execute_status"
+      dbname: console
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: console-002
+    name: console 简单——审批实例时间窗口聚合（近 7 日按天）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', created_at)::date AS d, count(*) AS n FROM approval_cases WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: console
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+  - id: console-003
+    name: console 复杂——分组覆盖归因（成员 JOIN 分组 + 聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT g.name, count(*) AS members FROM org_group_members m JOIN org_groups g ON m.group_id = g.group_id WHERE m.joined_at >= date_trunc('day', now()) - interval '30 day' AND m.joined_at < date_trunc('day', now()) GROUP BY g.name ORDER BY g.name"
+      dbname: console
+    expect:
+      status: success
+      rows: 5
+      truncated: false
+      psql_compare: true
+
+  # ── notification（db=notification）────────────────────────────────────
+  - id: notif-001
+    name: notification 简单——邮件投递枚举状态聚合（近 7 日）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM email_deliveries WHERE created_at >= date_trunc('day', now()) - interval '7 day' AND created_at < date_trunc('day', now()) GROUP BY status ORDER BY status"
+      dbname: notification
+    expect:
+      status: success
+      rows: 4
+      truncated: false
+      psql_compare: true
+  - id: notif-002
+    name: notification 简单——邮件投递时间窗口聚合（近 3 日按天）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', created_at)::date AS d, count(*) AS n FROM email_deliveries WHERE created_at >= date_trunc('day', now()) - interval '3 day' AND created_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: notification
+    expect:
+      status: success
+      rows: 3
+      truncated: false
+      psql_compare: true
+  - id: notif-003
+    name: notification 复杂——投递失败归因（投递 LEFT JOIN 尝试 + 聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT d.status, count(DISTINCT d.delivery_id) AS deliveries, count(a.attempt_id) AS attempts FROM email_deliveries d LEFT JOIN email_delivery_attempts a ON d.delivery_id = a.delivery_id WHERE d.created_at >= date_trunc('day', now()) - interval '7 day' AND d.created_at < date_trunc('day', now()) GROUP BY d.status ORDER BY d.status"
+      dbname: notification
+    expect:
+      status: success
+      rows: 4
+      truncated: false
+      psql_compare: true
+
+  # ── ops-ticket（db=ops_ticket）────────────────────────────────────────
+  - id: ticket-001
+    name: ops-ticket 简单——工单枚举状态聚合
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT status, count(*) AS n FROM support_tickets GROUP BY status ORDER BY status"
+      dbname: ops_ticket
+    expect:
+      status: success
+      rows: 4
+      truncated: false
+      psql_compare: true
+  - id: ticket-002
+    name: ops-ticket 简单——工单提交时间窗口聚合（近 7 日按天）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT date_trunc('day', submitted_at)::date AS d, count(*) AS n FROM support_tickets WHERE submitted_at >= date_trunc('day', now()) - interval '7 day' AND submitted_at < date_trunc('day', now()) GROUP BY 1 ORDER BY 1"
+      dbname: ops_ticket
+    expect:
+      status: success
+      rows: 7
+      truncated: false
+      psql_compare: true
+  - id: ticket-003
+    name: ops-ticket 复杂——工单来源归因（工单 JOIN 来源 + 分组聚合 + 时间窗口）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT s.name, t.status, count(*) AS n FROM support_tickets t JOIN support_ticket_sources s ON t.source_id = s.id WHERE t.submitted_at >= date_trunc('day', now()) - interval '7 day' AND t.submitted_at < date_trunc('day', now()) GROUP BY s.name, t.status ORDER BY s.name, t.status"
+      dbname: ops_ticket
+    expect:
+      status: success
+      rows: 12
+      truncated: false
+      psql_compare: true
+
+  # ── 无持库服务（dashboard-backend / ops-operation / usage-collection）
+  # 语义元数据用例：服务实体可达 + 拓扑如实（无 contains 边）。数据源 =
+  # 验收环境同步的 samples/semantic（run.sh semantic-sync）。
+  - id: dash-001
+    name: dashboard-backend 简单——服务实体可达（get_entity）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: dashboard-backend
+    expect:
+      status: success
+      paths:
+        - path: kind
+          eq: service
+        - path: name
+          eq: dashboard-backend
+  - id: dash-002
+    name: dashboard-backend 简单——服务实体描述（语义内容抽查）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: dashboard-backend
+    expect:
+      status: success
+      paths:
+        - path: description
+          eq: "工作台 BFF——聚合 iam/bss/通知/工单数据的聚合网关（无持库）"
+  - id: dash-003
+    name: dashboard-backend 复杂——语义拓扑遍历（无持库 = 无 contains 边，如实返回起点）
+    modes: [http, stdio]
+    tool: traverse_relations
+    key: dev-alice
+    args:
+      fqn: dashboard-backend
+      relation: contains
+      direction: out
+      max_depth: 2
+    expect:
+      status: success
+      paths:
+        - path: nodes[0].fqn
+          eq: dashboard-backend
+        - path: nodes[0].kind
+          eq: service
+  - id: ops-001
+    name: ops-operation 简单——服务实体可达（get_entity）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: ops-operation
+    expect:
+      status: success
+      paths:
+        - path: kind
+          eq: service
+        - path: name
+          eq: ops-operation
+  - id: ops-002
+    name: ops-operation 简单——服务实体描述（语义内容抽查）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: ops-operation
+    expect:
+      status: success
+      paths:
+        - path: description
+          eq: "运营编排服务——工单/审批等运营动作的编排层（无持库，纯编排）"
+  - id: ops-003
+    name: ops-operation 复杂——语义拓扑遍历（无持库 = 无 contains 边，如实返回起点）
+    modes: [http, stdio]
+    tool: traverse_relations
+    key: dev-alice
+    args:
+      fqn: ops-operation
+      relation: contains
+      direction: out
+      max_depth: 2
+    expect:
+      status: success
+      paths:
+        - path: nodes[0].fqn
+          eq: ops-operation
+        - path: nodes[0].kind
+          eq: service
+  - id: usage-001
+    name: usage-collection 简单——服务实体可达（get_entity）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: usage-collection
+    expect:
+      status: success
+      paths:
+        - path: kind
+          eq: service
+        - path: name
+          eq: usage-collection
+  - id: usage-002
+    name: usage-collection 简单——服务实体描述（语义内容抽查）
+    modes: [http, stdio]
+    tool: get_entity
+    key: dev-alice
+    args:
+      fqn: usage-collection
+    expect:
+      status: success
+      paths:
+        - path: description
+          eq: "用量采集服务——推理用量事件采集（Kafka + WAL，无持库）"
+  - id: usage-003
+    name: usage-collection 复杂——语义拓扑遍历（无持库 = 无 contains 边，如实返回起点）
+    modes: [http, stdio]
+    tool: traverse_relations
+    key: dev-alice
+    args:
+      fqn: usage-collection
+      relation: contains
+      direction: out
+      max_depth: 2
+    expect:
+      status: success
+      paths:
+        - path: nodes[0].fqn
+          eq: usage-collection
+        - path: nodes[0].kind
+          eq: service
 
   # ── §6.3 负向例 1：未授权表拒绝 ────────────────────────────────────────
   - id: neg-001a
@@ -201,21 +818,19 @@ cases:
     replay_skip: true
 
   # ── §6.3 负向例 5：无指标原料路径 ─────────────────────────────────────
-  # 语义仓库（build 13 前）无「支付失败」指标 → Agent 走表/列原料路径成功
-  # 产出结果：先确认无现成指标（search_entities type=metric 零命中），再
-  # 直查原料表得到答案。
-  # build 13 落地后注意：验收环境的语义仓库会注入指标——本用例断言「无
-  # 指标」依赖验收环境的语义存储保持为空（run.sh 不 sync 语义数据）。若
-  # build 14 需要带语义数据的验收环境，本用例需换「无指标领域」fixture
-  # （README 记录该隔离策略），不能依赖全局空存储。
+  # build 14 起验收环境带语义数据（run.sh semantic-sync 同步 samples/
+  # semantic）——「无指标」不能依赖全局空存储，换「无指标领域」fixture
+  # （README/用例清单记录隔离策略）：退款域只有概念无指标（metrics.yaml
+  # 仅 payment_failure_rate），search_entities(type=metric, 退款) 零命中
+  # → Agent 走表/列原料路径直查退款单成功产出结果。
   - id: neg-005
-    name: 无指标原料路径——无现成指标，Agent 走表/列原料路径成功产出结果
+    name: 无指标原料路径——退款域无现成指标，Agent 走表/列原料路径直查退款单产出结果
     modes: [http, stdio]
     key: dev-alice
     steps:
       - tool: search_entities
         args:
-          query: "支付失败"
+          query: "退款"
           type: metric
         expect:
           status: success
@@ -224,10 +839,10 @@ cases:
               eq: 0
       - tool: execute_sql
         args:
-          sql: "SELECT status, count(*) AS n FROM orders WHERE status = 'refunded' GROUP BY status"
-          dbname: bill
+          sql: "SELECT status, count(*) AS n FROM refund_orders GROUP BY status ORDER BY status"
+          dbname: wallet
         expect:
           status: success
-          rows: 1
+          rows: 3
           truncated: false
           psql_compare: true
