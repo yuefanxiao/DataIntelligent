@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
@@ -93,6 +95,22 @@ func TestPgError(t *testing.T) {
 		}
 	})
 
+	t.Run("连接失败 → internal（调用方不可自愈）", func(t *testing.T) {
+		for _, code := range []string{"08006", "08001"} {
+			e := pgError(&pgconn.PgError{Code: code, Message: "connection failed"})
+			if e.Kind != gwerr.KindInternal {
+				t.Errorf("code %s kind = %s，期望 %s", code, e.Kind, gwerr.KindInternal)
+			}
+		}
+	})
+
+	t.Run("实例停机 → internal", func(t *testing.T) {
+		e := pgError(&pgconn.PgError{Code: "57P01", Message: "admin shutdown"})
+		if e.Kind != gwerr.KindInternal {
+			t.Errorf("kind = %s，期望 %s", e.Kind, gwerr.KindInternal)
+		}
+	})
+
 	t.Run("非 PgError → internal", func(t *testing.T) {
 		e := pgError(errors.New("connection refused"))
 		if e.Kind != gwerr.KindInternal {
@@ -108,14 +126,22 @@ func TestExecuteSQLLimitValidation(t *testing.T) {
 			t.Errorf("limit=%d 应启动失败", bad)
 		}
 	}
-	// 合法范围：注入依赖（New 后续需要 store 加载授权快照）。
+	// 合法范围：注入依赖（New 后续需要 store 加载授权快照；router 用不触
+	// 连接的假 DSN——pgxpool 惰性建连）。
 	st, err := store.Open(filepath.Join(t.TempDir(), "dgw.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer st.Close()
+	router, err := db.NewRouter(context.Background(), []db.Entry{
+		{DBName: "bss", Service: "bss", DSN: "postgres://dgw_ro@127.0.0.1:1/bss"},
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("db.NewRouter: %v", err)
+	}
+	defer router.Close()
 	for _, ok := range []int{500, 1000, 5000} {
-		g, err := New(st, nil, WithExecuteSQL(nil, ok))
+		g, err := New(st, nil, WithExecuteSQL(router, ok))
 		if err != nil {
 			t.Errorf("limit=%d 应合法: %v", ok, err)
 		} else if g.execSQL == nil || g.execSQL.limit != ok {

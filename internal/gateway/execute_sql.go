@@ -70,7 +70,9 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	// ── 段 1：AST 分类 + 表提取 + 授权比对（03 票，fail closed）────────────
-	user, _ := UserFromContext(ctx)
+	// 授权判定必须经 AuthorizeBusinessTable（02 票的单入口契约）：
+	// 授权路径永远走它，validate 只决定错误形状（unknown_table 是映射失败，
+	// 不走授权判定）。
 	resolve := func(ref validate.TableRef) []string {
 		// v1 表均在 public schema（生产形态，spec §8）：未限定或 public →
 		// 单候选 FQN 服务.库.表；其他 schema 无法映射（未知表，拒绝）。
@@ -79,7 +81,28 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 		}
 		return []string{service + "." + dbname + "." + ref.Table}
 	}
-	allow := func(fqn string) bool { return g.authz.Allow(user, fqn) }
+	allow := func(fqn string) bool {
+		return g.AuthorizeBusinessTable(ctx, fqn) == nil
+	}
+	// 语句计数先于 Check（Check 内部会再解析一次——WASM 解析毫秒级，可接受）：
+	// 0 条 = 纯注释等无可执行内容；>1 条 = 批处理（pgx 单语句协议 + 包层括号
+	// 内不允许语句分隔，v1 无批处理语义）——都显式结构化拒绝，避免误导性 42601。
+	stmts, perr := validate.Parse(in.SQL)
+	if perr != nil {
+		return errResult(perr), nil, nil
+	}
+	if len(stmts) == 0 {
+		return errResult(gwerr.InvalidRequest(
+			"SQL 不含可执行语句（仅注释/空白）",
+			map[string]any{"reason": "empty"},
+		)), nil, nil
+	}
+	if len(stmts) > 1 {
+		return errResult(gwerr.InvalidRequest(
+			"多条语句不被支持（execute_sql 一次执行一条只读查询）",
+			map[string]any{"reason": "multi_statement"},
+		)), nil, nil
+	}
 	if _, verr := validate.Check(in.SQL, resolve, allow); verr != nil {
 		return errResult(verr), nil, nil
 	}
@@ -220,6 +243,7 @@ func uuidString(b [16]byte) string {
 // pgError 把 PG 执行错误映射为结构化错误（区分可机器处理的类别）：
 //   - 57014 语句超时 → invalid_request/timeout（Agent 可决定降级或放弃）；
 //   - 42501 权限拒绝（物理边界兜底）→ permission_denied；
+//   - 08* 连接类 / 57P* 实例停机类 → internal（调用方不可自愈）；
 //   - 其余（含 42601 语法错误）→ invalid_request/pg_error + SQLSTATE。
 //
 // 网关不重试；「被拒原因」由 06 票的执行记录落盘。
@@ -234,6 +258,10 @@ func pgError(err error) *gwerr.Error {
 		case "42501": // insufficient_privilege——角色层兜底拒绝
 			details["reason"] = "not_granted"
 			return gwerr.PermissionDenied(fmt.Sprintf("数据库层权限拒绝（物理边界兜底）: %s", pgErr.Message), details)
+		}
+		if strings.HasPrefix(pgErr.Code, "08") || strings.HasPrefix(pgErr.Code, "57P") {
+			// 连接失败（08001/08006…）/ 实例关闭（57P01/57P02/57P03…）
+			return gwerr.Internal(fmt.Sprintf("数据库不可用 [%s]: %s", pgErr.Code, pgErr.Message))
 		}
 		return gwerr.InvalidRequest(fmt.Sprintf("数据库执行失败 [%s]: %s", pgErr.Code, pgErr.Message), details)
 	}

@@ -75,20 +75,26 @@ func validateEntry(e Entry) error {
 	return nil
 }
 
+// route 是单条 dbname 路由的运行时形态：连接池 + 服务归属（FQN 服务段）。
+type route struct {
+	pool    *pgxpool.Pool
+	service string
+}
+
 // Router 是按 dbname 路由的池集合：启动时按 Entry 建池（连接惰性建立），
 // 每个连接强制物理边界参数；Lookup 按 dbname 取池 + 服务归属。
+//
+// 说明：DSN 的目标库与 Entry.DBName 的一致性不在此校验（需连库查询
+// current_database()，属 10 票启动自检的职责）；配置时保证 DSN 指向
+// dbname 对应数据库。
 type Router struct {
-	pools map[string]*pgxpool.Pool
-	svc   map[string]string
+	routes map[string]route
 }
 
 // NewRouter 按路由表建池；statementTimeout 为连接级 statement_timeout。
 // 任一 DSN 不可解析 = 启动失败（fail fast：配置错误绝不能带病服务）。
 func NewRouter(ctx context.Context, entries []Entry, statementTimeout time.Duration) (*Router, error) {
-	r := &Router{
-		pools: make(map[string]*pgxpool.Pool, len(entries)),
-		svc:   make(map[string]string, len(entries)),
-	}
+	r := &Router{routes: make(map[string]route, len(entries))}
 	for _, e := range entries {
 		cfg, err := pgxpool.ParseConfig(e.DSN)
 		if err != nil {
@@ -102,8 +108,7 @@ func NewRouter(ctx context.Context, entries []Entry, statementTimeout time.Durat
 			r.Close()
 			return nil, fmt.Errorf("dbname %q 建池失败: %w", e.DBName, err)
 		}
-		r.pools[e.DBName] = pool
-		r.svc[e.DBName] = e.Service
+		r.routes[e.DBName] = route{pool: pool, service: e.Service}
 	}
 	return r, nil
 }
@@ -111,18 +116,18 @@ func NewRouter(ctx context.Context, entries []Entry, statementTimeout time.Durat
 // Lookup 按 dbname 取池与服务归属；未知 dbname 返回 ok=false（调用方按
 // 无效请求拒绝，不 panic）。
 func (r *Router) Lookup(dbname string) (pool *pgxpool.Pool, service string, ok bool) {
-	pool, ok = r.pools[dbname]
+	rt, ok := r.routes[dbname]
 	if !ok {
 		return nil, "", false
 	}
-	return pool, r.svc[dbname], true
+	return rt.pool, rt.service, true
 }
 
 // Single 返回唯一 dbname（路由表恰好一条时），供 execute_sql 省略 dbname
 // 参数的缺省推断；多库配置返回 ""（调用方要求显式指定）。
 func (r *Router) Single() string {
-	if len(r.pools) == 1 {
-		for dbname := range r.pools {
+	if len(r.routes) == 1 {
+		for dbname := range r.routes {
 			return dbname
 		}
 	}
@@ -131,7 +136,7 @@ func (r *Router) Single() string {
 
 // Close 关闭全部池（网关退出时调用）。
 func (r *Router) Close() {
-	for _, p := range r.pools {
-		p.Close()
+	for _, rt := range r.routes {
+		rt.pool.Close()
 	}
 }

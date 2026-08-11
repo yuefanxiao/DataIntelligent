@@ -31,7 +31,7 @@ docs/spec.md §2/§4.3/§4.5；ADR-0008；issue #15
 
 ## 备注
 
-- 测试期发现两个真实问题并修复：pgx 执行期错误（57014）在 rows.Err() 阶段浮现需按 pgError 分类；uuid 解码为原始 16 字节需格式化为规范文本
+- code review 修复：授权路径回归 AuthorizeBusinessTable 单入口（02 票契约）；多语句/仅注释 SQL 显式结构化拒绝（multi_statement/empty）；pgError 连接类（08*/57P*）→ internal；Router 平行 map 合并为 route 结构；WithExecuteSQL(nil) 启动失败；e2e 补 unknown_table/multi_statement 用例
 - 限额越界（<500 或 >5000）= 启动失败 fail fast；`>5000 硬上限行为正确` = 配置层拒绝越界
 - 值归一化：numeric → 文本（与 psql 一致）、bytea → \x 十六进制、jsonb → 原生 JSON、时间 → RFC3339Nano
 

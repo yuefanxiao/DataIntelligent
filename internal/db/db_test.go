@@ -3,8 +3,6 @@ package db
 import (
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestParseEntries(t *testing.T) {
@@ -83,10 +81,7 @@ func TestRouterLookupAndSingle(t *testing.T) {
 		t.Fatal("未知 dbname 应 ok=false")
 	}
 	// Lookup 的 service 段透传（不触连接；池为 nil 只验路由命中）
-	r2 := &Router{
-		pools: map[string]*pgxpool.Pool{"bss": nil},
-		svc:   map[string]string{"bss": "bss"},
-	}
+	r2 := &Router{routes: map[string]route{"bss": {service: "bss"}}}
 	if _, svc, ok := r2.Lookup("bss"); !ok || svc != "bss" {
 		t.Fatalf("Lookup(bss) = (%v, %q)，期望 (true, bss)", ok, svc)
 	}

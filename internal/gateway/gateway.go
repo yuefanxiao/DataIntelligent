@@ -84,6 +84,9 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 		opt(&o)
 	}
 	g.execSQL = o.execSQL
+	if g.execSQL != nil && g.execSQL.router == nil {
+		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
+	}
 	if g.execSQL != nil && (g.execSQL.limit < sqlLimitDefault || g.execSQL.limit > sqlLimitMax) {
 		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, sqlLimitDefault, sqlLimitMax)
 	}

@@ -147,7 +147,7 @@ func freePort() int {
 func requirePG(t *testing.T) {
 	t.Helper()
 	if !pgOK {
-		t.Skip("本机无 PostgreSQL（initdb/pg_ctl 缺失），跳过真实实例 e2e")
+		t.Skip("本机无 docker/PG 容器，跳过真实实例 e2e")
 	}
 }
 
@@ -370,6 +370,11 @@ func TestExecuteSQLE2ERejections(t *testing.T) {
 	if e.Kind != gwerr.KindPermission || e.Details["reason"] != "not_granted" {
 		t.Fatalf("未授权表错误 = %s reason=%v，期望 permission_denied/not_granted", e.Kind, e.Details["reason"])
 	}
+	// 非 public schema 引用 → 无法映射 → 未知表（unknown_table 路径）
+	e = callSQLErr(t, session, map[string]any{"sql": "SELECT * FROM audit.logs", "dbname": "bss"})
+	if e.Kind != gwerr.KindPermission || e.Details["reason"] != "unknown_table" {
+		t.Fatalf("未知表错误 = %s reason=%v，期望 permission_denied/unknown_table", e.Kind, e.Details["reason"])
+	}
 	// 非 SELECT → invalid_request/non_select
 	e = callSQLErr(t, session, map[string]any{"sql": "DELETE FROM orders WHERE id = 1", "dbname": "bss"})
 	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "non_select" {
@@ -380,10 +385,17 @@ func TestExecuteSQLE2ERejections(t *testing.T) {
 	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "syntax_error" {
 		t.Fatalf("语法错误 = %s reason=%v，期望 invalid_request/syntax_error", e.Kind, e.Details["reason"])
 	}
-	// 空 SQL → invalid_request/empty
-	e = callSQLErr(t, session, map[string]any{"sql": "   ", "dbname": "bss"})
-	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "empty" {
-		t.Fatalf("空 SQL = %s reason=%v，期望 invalid_request/empty", e.Kind, e.Details["reason"])
+	// 空 SQL / 仅注释 → invalid_request/empty
+	for _, sql := range []string{"   ", "-- 只有注释"} {
+		e = callSQLErr(t, session, map[string]any{"sql": sql, "dbname": "bss"})
+		if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "empty" {
+			t.Fatalf("空 SQL %q = %s reason=%v，期望 invalid_request/empty", sql, e.Kind, e.Details["reason"])
+		}
+	}
+	// 批处理（多语句）→ invalid_request/multi_statement（不落到误导性 42601）
+	e = callSQLErr(t, session, map[string]any{"sql": "SELECT 1; SELECT 2", "dbname": "bss"})
+	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "multi_statement" {
+		t.Fatalf("批处理 = %s reason=%v，期望 invalid_request/multi_statement", e.Kind, e.Details["reason"])
 	}
 }
 
