@@ -6,7 +6,7 @@
 
 - 领域：数据平台 / Agent 基建 / MCP 生态
 - 消费方：开发人员经 Coding Agent（先在本地跑起来验证）
-- 环境事实：几十个服务、公用一个 PG（一主两从）、v1 只接从库、数据量千万~亿级、团队主力语言 Go
+- 环境事实：neo-cloud 13 个 Go 服务（Kratos）、10 个持库、**每服务一库**（同一 CNPG 集群、一主两从）、schema 统一 golang-migrate v4.19.1 维护（+GORM 交叉验证）、v1 只接从库、数据量千万~亿级、团队主力语言 Go
 - 已定决策（第 1、2 轮拷问）：
   - 终点 = spec + phase plan（Q1a）；拍板人 = yuefanxiao（Q5）
   - 只做工具层，不做 Agent 产品（Q6b）——先在本地 Coding Agent 跑起来
@@ -31,13 +31,17 @@
 - [13 语义层运行时存储与检索：SQLite 轻量版](https://github.com/yuefanxiao/DataIntelligent/issues/14) — 修正 07 存储载体：v1 运行时存储 = SQLite 单文件（modernc 纯 Go 无 CGO、WAL、单写者管线+多读者网关、备份=文件拷贝），v1 唯一实现；向量=sqlite-vec（v1.47.0 起内置 CGO-free 移植，SQL 内 KNN，退路=Go 暴力余弦）；PG 仅作多机/HA 升级路径记入 ADR-0005（ADR-0002 加修正指针）；授权数据/权限表随载体落 SQLite；审计存储方向留输入给 04。不变：YAML 作者入口+同步管线+五条原语+RRF+OpenAI embedding+不引入图数据库；生产查询目标仍为 PG 从库。
 
 - [04 审计设计：记录内容、存储与保留期](https://github.com/yuefanxiao/DataIntelligent/issues/5) — 「审计」重构为**执行记录**：六工具全记 + 认证失败/拒绝 + key 生命周期（CLI 一行）的结构化 JSONL 日志（宿主机文件 + 轮转），字段契约 = 时间/用户/key/工具/参数（SQL 原文入库不脱敏，宿主机权限即访问边界）/分阶段耗时/状态/行数/truncated/plan_id/被拒原因；原始 ~7 天 + 聚合摘要 ~30 天；不做 SQLite 证据存储、不做 CLI 查询面、不接 OTel（安全证据仅合规政策驱动时按契约升级）；驱动 = 排障（statement_timeout 自愈 + psql 手动杀 + 日志事后查）+ tracing + 优化数据源（08 的信号：被拒查询/原料路径/搜索关键词）。解封 12；输出 08（字段契约）、10（超时/截断分布）、11（日志位置）；ADR-0006 修正 ADR-0005 的审计输入。
+- [08 知识采集与保鲜：自动 vs 人工、增量更新](https://github.com/yuefanxiao/DataIntelligent/issues/9) — 混合分工：结构自动（migration 文件为主干 + GORM 交叉验证 + 按需 calibrate 生产校准）、语义人工（Agent 起草+审查、人工确认）；采集器 = Go CLI（与同步管线同仓、真实语料 golden test）+ 采集工作流 Skill；增量 v1 手动 on-demand、Gitea label 触发后置；变更准入 = diff 建议 + PR review（纯结构批量确认）；校验三层 = 编译期 + dry-run + 漂移报告（手动+每周、只报告不改）；回滚 = 独立语义仓库（内部 Gitea）+ revert + 全量重建；API 定义采集 v1 排除。事实确认：golang-migrate v4.19.1 + GORM（生产无 AutoMigrate）、每服务一库。输出 11（校准凭证）、12（golden 语料/drift 例行/Gitea 排期）；ADR-0007。
 
 ## Not yet specified
 
 - 权限后续优化：列级权限（拒绝/掩码）、行级 RLS、key 过期策略（03 决议后置，12 排期时定）
 - 管理工作台/控制台形态（权限与 API key 的更新界面 + 管理员口令）——03 已定 v2 候选，v1 用 grants YAML + CLI
 - 复制延迟容忍度与数据新鲜度约定
-- Schema 维护方式（ORM + migration？）——知识采集票据前需确认
+- Gitea 事件触发增量采集（合入 main 的 PR 带约定 label → 自动触发）的 label 约定与 CI 形态——08 已定后置，12 排期时定
+- 校准（calibrate 子命令）的例行化排程——08 已定 v1 按需，drift 每周例行与校准合流
+- API 定义采集（protobuf/OpenAPI）——08 已定 v1 排除，v2 候选
+- neo-cloud 之外的服务仓库（若生产服务不止于此）——采集源扩展，08 按「neo-cloud 即全部」假设记录
 - 网关自身的高可用 / 监控 / 告警需求
 
 ## Out of scope
@@ -48,4 +52,6 @@
 - 独立 Agent 产品（工具层先行，Q6b）
 - 跨会话记忆与自进化（长期愿景，目的地重画时再议）
 - 数仓 / OLAP 分析
+
+
 
