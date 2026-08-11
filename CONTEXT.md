@@ -44,7 +44,7 @@ _Avoid_: 语义模型仓库（语义模型是文件集合，仓库是它的落�
 _Avoid_: 自动采集（暗示语义也自动）、元数据同步（那是 YAML → 运行时存储的活）
 
 **采集器 Collector**:
-执行结构采集的自研 Go CLI（`dgw-collect`，与同步管线同仓）：解析 migration 文件生成 YAML 草稿，GORM 模型交叉验证 + 按需生产校准；确定性、可测试（真实迁移语料 golden test）。
+执行结构采集的自研 Go CLI（`dgw-collect`，与同步管线同仓）：解析 migration 文件生成 YAML 草稿，GORM 模型交叉验证 + 按需生产校准；确定性、可测试（真实迁移语料 golden test）。**触发 = 手动 on-demand**（克隆语义仓库 → 跑采集 → 人工 review → 合入 → 手动触发同步管线），**无自动轮询/定时采集**；独立 CLI，不进网关镜像。
 _Avoid_: 采集 Agent（结构采集是 CLI 的活，Agent 只做语义起草与审查）
 
 **校准 Calibration**:

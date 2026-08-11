@@ -34,17 +34,20 @@
 - [08 知识采集与保鲜：自动 vs 人工、增量更新](https://github.com/yuefanxiao/DataIntelligent/issues/9) — 混合分工：结构自动（migration 文件为主干 + GORM 交叉验证 + 按需 calibrate 生产校准）、语义人工（Agent 起草+审查、人工确认）；采集器 = Go CLI（与同步管线同仓、真实语料 golden test）+ 采集工作流 Skill；增量 v1 手动 on-demand、Gitea label 触发后置；变更准入 = diff 建议 + PR review（纯结构批量确认）；校验三层 = 编译期 + dry-run + 漂移报告（手动+每周、只报告不改）；回滚 = 独立语义仓库（内部 Gitea）+ revert + 全量重建；API 定义采集 v1 排除。事实确认：golang-migrate v4.19.1 + GORM（生产无 AutoMigrate）、每服务一库。输出 11（校准凭证）、12（golden 语料/drift 例行/Gitea 排期）；ADR-0007。
 - [10 SQL 生成路线决策：Wren 自托管 vs 自研 vs LLM+校验](https://github.com/yuefanxiao/DataIntelligent/issues/11) — v1 路线 = 02 方案甲（Agent 侧规划）+ 05 指标确定性编译 + **网关确定性校验层**（execute_sql 内部强制管线：wasilibs/go-pgquery cgo-free AST 分类（非 SELECT 一律拒）→ AST 为唯一授权通道比对 03 表 FQN 白名单 → PG 共享只读角色/超时物理边界 → `SELECT * FROM (<sql>) _q LIMIT N` 限额包层）；失败=结构化错误回传调用方、网关无自愈循环；并发闸（每 key+进程级，超限结构化拒绝）+ statement_timeout 收紧，数值归 12；数据行流向消费方 Agent=产品设计，网关第三方出口仅元数据 embedding（07）；**Wren 自托管出局**（2026 事实：经典栈冻结 legacy/v1 不修安全、新 OSS 无 Go 绑定/无 HTTP API、RLS/审计=商业版）；不自研完整 compiler（自由诉求需 LLM 在前端、规划器级工程量）；v2 create_query_plan 引擎选型延后（12 排期时定，02 草案接口冻结、plan_id 已预留、引擎可插拔）。输出 03（校验层=授权物理实现）、12（落地/数值/排期）；ADR-0008。
 
+- [11 部署拓扑：本地起步、接从库、高可用](https://github.com/yuefanxiao/DataIntelligent/issues/12) — 双传输实现（Streamable HTTP 为主 + bearer token 认证、stdio 调试形态；并发闸按守护进程语义，数值归 12）；部署位 = **内部开发机单机 Docker**（不进生产集群：SQLite/logs/env 三 volume、restart 兜底），数据库凭证仅存该机 env 文件、开发机零凭证；从库连接 = **可配置 DSN 口子** + dbname 路由（生产网络通路方案生产部署时定）；DB 角色 = 专用共享只读角色、**provisioning 开发自建**（服务器 root/kubectl 取 CNPG postgres 超管建角色）、网关永不超管；执行记录 JSONL = 网关机本地 volume；采集器保留 = 手动 on-demand 无轮询 + 采集工作流 Skill 记 v1 交付物；数据新鲜度 = 接受从库延迟 + 启动自检（pg_is_in_recovery + 角色级 statement_timeout，不过拒启）；监控/告警、正式上线回滚流程 = 后续优化项。解封 12；输出 12（交付物清单、数值按守护进程语义）；ADR-0009。
+
 ## Not yet specified
 
 - 权限后续优化：列级权限（拒绝/掩码）、行级 RLS、key 过期策略（03 决议后置，12 排期时定）
 - 管理工作台/控制台形态（权限与 API key 的更新界面 + 管理员口令）——03 已定 v2 候选，v1 用 grants YAML + CLI
-- 复制延迟容忍度与数据新鲜度约定
+- 复制延迟监测（pg_stat_replication 周期性读数）——11 已定 v1 不做，与监控栈一并定
 - Gitea 事件触发增量采集（合入 main 的 PR 带约定 label → 自动触发）的 label 约定与 CI 形态——08 已定后置，12 排期时定
 - 校准（calibrate 子命令）的例行化排程——08 已定 v1 按需，drift 每周例行与校准合流
 - API 定义采集（protobuf/OpenAPI）——08 已定 v1 排除，v2 候选
 - neo-cloud 之外的服务仓库（若生产服务不止于此）——采集源扩展，08 按「neo-cloud 即全部」假设记录
-- 网关自身的高可用 / 监控 / 告警需求
+- 网关高可用/监控/告警（含 OTel）——11 已定 v1 不做（执行记录 + docker restart 兜底），后续优化项；OTel = 多机/HA 出现时升级路径（ADR-0006 在案）
 - v2 网关侧规划引擎选型（create_query_plan：外部 LLM API vs 私有化模型 vs 不做网关侧规划）与诉求/元数据出机房边界——10 已定延后，12 排期时定
+- 生产网络通路方案（NodePort vs port-forward 常驻 vs 内网 LB；开发机无法解析集群内 DNS）——11 已定 v1 可配置 DSN 留口子，生产部署时定
 - 负载防护参数（每 key/进程级并发上限、statement_timeout 默认值）——10 已定机制，数值归 12 定
 
 ## Out of scope
