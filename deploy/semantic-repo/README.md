@@ -18,10 +18,10 @@ commit/revert/review 即版本机制与变更闸门。本目录 = 仓库初始�
 ## 标准工作流（采集 → review → 合入 → 同步）
 
 ```sh
-# 采集器：结构知识 → YAML 草稿（写在 clone 的 services/ 下）
+# 采集器：结构知识 → YAML 草稿（写在 clone 的 services/ 下；--out 指向 clone 根）
 dgw-collect scan --repo ~/cloud/neo-cloud \
   --manifest samples/collector/manifest.yaml \
-  --out ./semantic-repo/services
+  --out ./semantic-repo
 
 # 自查 diff（草稿会覆盖同名服务文件）
 git -C ./semantic-repo diff

@@ -112,4 +112,6 @@ cd deploy/demo && go run mcp-ping.go --addr http://127.0.0.1:8080/mcp \
 - `provisioning/readonly-role.sql` —— 共享只读角色（可重放 SQL）；
 - `semantic-repo/bootstrap.sh` —— 语义仓库本地 clone 操作路径；
 - `semantic-repo/verify.sh` —— 操作路径全链路自动化验证；
+- `skills/` —— 随网关/采集器交付的两件 Skill 使用指南（Agent Skill +
+  采集工作流 Skill，issue #28）；
 - 启动自检（`internal/db/selfcheck.go` + `dgw selfcheck` + serve 拒启）。
