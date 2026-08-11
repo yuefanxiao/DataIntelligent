@@ -1,0 +1,348 @@
+version: 1
+service: bss-invoice
+description: 开票服务——发票抬头、开票申请与电子发票
+databases:
+  - name: bss_invoice
+    description: 开票库（public schema）——开票申请与电子发票
+    tables:
+      - name: invoice_account_balances
+        description: 组织开票额度——处理中/已开具的金额与数量
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(64)
+          - name: currency
+            type: varchar(16)
+          - name: in_progress_amount
+            type: numeric(20,6)
+          - name: issued_amount
+            type: numeric(20,6)
+          - name: in_progress_count
+            type: bigint
+          - name: issued_count
+            type: bigint
+          - name: last_movement_id
+            type: bigint
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+      - name: invoice_amount_movements
+        description: 开票额度流水——预留/释放/消费/冲正
+        columns:
+          - name: id
+            type: bigint
+          - name: movement_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: currency
+            type: varchar(16)
+          - name: application_id
+            type: varchar(64)
+          - name: movement_type
+            type: varchar(32)
+            enum_values:
+              - value: consume
+                label: 消费
+              - value: release
+                label: 释放
+              - value: reserve
+                label: 预留
+              - value: reverse
+                label: 冲正
+          - name: amount
+            type: numeric(20,6)
+          - name: balance_in_progress_after
+            type: numeric(20,6)
+          - name: balance_issued_after
+            type: numeric(20,6)
+          - name: reason
+            type: varchar(64)
+          - name: operator_user_id
+            type: varchar(64)
+          - name: request_key
+            type: varchar(128)
+          - name: request_hash
+            type: varchar(128)
+          - name: created_at
+            type: timestamp with time zone
+            is_time: true
+          - name: updated_at
+            type: timestamp with time zone
+      - name: invoice_applications
+        description: 开票申请——客户发票申请单（含失败原因）
+        columns:
+          - name: id
+            type: bigint
+          - name: application_id
+            type: varchar(64)
+            description: 申请单号
+          - name: org_id
+            type: varchar(64)
+            description: 组织 ID
+          - name: applicant_user_id
+            type: varchar(64)
+          - name: request_key
+            type: varchar(128)
+          - name: request_hash
+            type: varchar(128)
+          - name: status
+            type: varchar(32)
+            description: 申请状态
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: in_progress
+                label: 处理中
+              - value: issued
+                label: 已开票
+          - name: invoice_type
+            type: varchar(32)
+            description: 发票类型（普通/专用）
+            enum_values:
+              - value: normal
+                label: 普通发票
+              - value: special
+                label: 专用发票
+          - name: fee_item
+            type: varchar(32)
+            description: 费用项（技术服务费/云服务费）
+            enum_values:
+              - value: cloud_service
+                label: 云服务费
+              - value: technical_service
+                label: 技术服务费
+          - name: amount
+            type: numeric(20,6)
+            description: 开票金额
+          - name: currency
+            type: varchar(16)
+          - name: tax_rate
+            type: numeric(10,6)
+          - name: tax_amount
+            type: numeric(20,6)
+          - name: title_snapshot
+            type: jsonb
+          - name: issuer_snapshot
+            type: jsonb
+          - name: receive_method
+            type: varchar(32)
+            enum_values:
+              - value: email
+                label: 邮箱
+              - value: mobile
+                label: 手机
+          - name: receive_address
+            type: varchar(255)
+          - name: remark
+            type: text
+          - name: rejection_reason
+            type: varchar(64)
+            description: 驳回原因
+          - name: rejection_message
+            type: text
+            description: 驳回说明
+          - name: handler_user_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamp with time zone
+            is_time: true
+          - name: issued_at
+            type: timestamp with time zone
+          - name: failed_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+          - name: org_type
+            type: varchar(32)
+      - name: invoice_export_operations
+        description: 开票导出任务
+        columns:
+          - name: id
+            type: bigint
+          - name: operation_id
+            type: VARCHAR(64)
+          - name: requested_by
+            type: VARCHAR(64)
+          - name: status
+            type: VARCHAR(32)
+            enum_values:
+              - value: FAILED
+                label: 失败
+              - value: PENDING
+                label: 待处理
+              - value: RUNNING
+                label: 运行中
+              - value: SUCCEEDED
+                label: 成功
+          - name: filter_snapshot
+            type: JSONB
+          - name: filter_hash
+            type: VARCHAR(128)
+          - name: file_name
+            type: VARCHAR(255)
+          - name: range_start_time
+            type: TIMESTAMPTZ
+          - name: range_end_time
+            type: TIMESTAMPTZ
+          - name: oss_object_key
+            type: VARCHAR(1024)
+          - name: owner_token
+            type: VARCHAR(128)
+          - name: lease_until
+            type: TIMESTAMPTZ
+          - name: error_code
+            type: VARCHAR(64)
+          - name: error_message
+            type: TEXT
+          - name: created_at
+            type: TIMESTAMPTZ
+          - name: updated_at
+            type: TIMESTAMPTZ
+          - name: started_at
+            type: TIMESTAMPTZ
+          - name: finished_at
+            type: TIMESTAMPTZ
+      - name: invoice_files
+        description: 发票文件——电子发票文件与税控绑定
+        columns:
+          - name: id
+            type: bigint
+          - name: file_id
+            type: varchar(64)
+          - name: application_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: file_name
+            type: varchar(255)
+          - name: content_type
+            type: varchar(128)
+          - name: size_bytes
+            type: bigint
+          - name: sha256
+            type: varchar(64)
+          - name: storage_provider
+            type: varchar(32)
+          - name: bucket
+            type: varchar(128)
+          - name: object_key
+            type: varchar(512)
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: bound
+                label: 已绑定
+              - value: upload_pending
+                label: 待上传
+          - name: upload_expires_at
+            type: timestamp with time zone
+          - name: created_by
+            type: varchar(64)
+          - name: bound_tax_invoice_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+      - name: invoice_titles
+        description: 发票抬头——用户/企业开票抬头信息
+        columns:
+          - name: id
+            type: bigint
+          - name: title_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+          - name: title_type
+            type: varchar(32)
+            enum_values:
+              - value: enterprise
+                label: 企业抬头
+              - value: personal
+                label: 个人抬头
+          - name: name
+            type: varchar(255)
+          - name: taxpayer_id
+            type: varchar(64)
+          - name: registered_address
+            type: varchar(255)
+          - name: registered_phone
+            type: varchar(64)
+          - name: bank_name
+            type: varchar(255)
+          - name: bank_account
+            type: varchar(128)
+          - name: source
+            type: varchar(64)
+            enum_values:
+              - value: enterprise_verification
+                label: 企业认证
+              - value: realname_verification
+                label: 实名认证
+              - value: user_created
+                label: 用户创建
+          - name: created_by
+            type: varchar(64)
+          - name: created_at
+            type: timestamp with time zone
+            is_time: true
+          - name: updated_at
+            type: timestamp with time zone
+          - name: deleted_at
+            type: timestamp with time zone
+      - name: tax_invoices
+        description: 已开具电子发票
+        columns:
+          - name: id
+            type: bigint
+          - name: tax_invoice_id
+            type: varchar(64)
+          - name: application_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: invoice_code
+            type: varchar(64)
+          - name: invoice_number
+            type: varchar(128)
+          - name: tax_control_url
+            type: text
+          - name: invoice_type
+            type: varchar(32)
+            enum_values:
+              - value: normal
+                label: 普通发票
+              - value: special
+                label: 专用发票
+          - name: amount
+            type: numeric(20,6)
+          - name: tax_amount
+            type: numeric(20,6)
+          - name: currency
+            type: varchar(16)
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: issued
+                label: 已开具
+          - name: issued_at
+            type: timestamp with time zone
+            is_time: true
+          - name: created_by
+            type: varchar(64)
+          - name: file_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone

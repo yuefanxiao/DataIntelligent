@@ -1,0 +1,521 @@
+version: 1
+service: bss-wallet
+description: 钱包服务——组织（客户）余额钱包：充值支付、扣费结算、退款与代金券
+databases:
+  - name: wallet
+    description: 钱包库（schema wallet）——组织余额与资金变动的事实库
+    tables:
+      - name: allocations
+        description: 代金券抵扣分配——券抵扣流水与交易行的关联明细
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: allocation_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: transaction_id
+            type: varchar(128)
+          - name: line_id
+            type: varchar(128)
+          - name: voucher_id
+            type: varchar(128)
+          - name: amount
+            type: numeric(30,12)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+        references:
+          - to: bss-wallet.wallet.vouchers
+            "on": allocations.voucher_id = vouchers.voucher_id
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": allocations.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": allocations.transaction_id = wallet_transactions.transaction_id
+      - name: deduction_ref_latest
+        description: 扣费幂等最近引用——按引用 ID 记录最近一次扣费请求（幂等去重的最近态）
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+          - name: ref_id
+            type: varchar(128)
+          - name: last_idempotency_key
+            type: varchar(128)
+          - name: request_fingerprint
+            type: varchar(128)
+          - name: transaction_id
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": deduction_ref_latest.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": deduction_ref_latest.transaction_id = wallet_transactions.transaction_id
+      - name: deduction_request_idem
+        description: 扣费请求幂等表——扣费请求指纹去重登记
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+          - name: idempotency_key
+            type: varchar(128)
+          - name: ref_id
+            type: varchar(128)
+          - name: request_fingerprint
+            type: varchar(128)
+          - name: transaction_id
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": deduction_request_idem.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": deduction_request_idem.transaction_id = wallet_transactions.transaction_id
+      - name: payment_orders
+        description: 充值支付单——客户充值支付订单（主用例「支付失败率」的载体）
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: order_id
+            type: varchar(128)
+            description: 支付单业务单号（唯一）
+          - name: org_id
+            type: varchar(36)
+          - name: requested_amount
+            type: numeric(30,12)
+            description: 请求充值金额
+          - name: paid_amount
+            type: numeric(30,12)
+            description: 实际支付金额
+          - name: debt_offset_amount
+            type: numeric(30,12)
+            description: 欠款抵扣金额
+          - name: remaining_amount
+            type: numeric(30,12)
+          - name: frozen_remaining_amount
+            type: numeric(30,12)
+          - name: fee_amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: channel
+            type: smallint
+            description: 支付渠道（2 微信支付/4 支付宝/5 银行转账）
+            enum_values:
+              - value: "2"
+                label: 微信支付
+              - value: "4"
+                label: 支付宝
+              - value: "5"
+                label: 银行转账
+          - name: channel_order_id
+            type: varchar(128)
+          - name: channel_transaction_id
+            type: varchar(128)
+          - name: code_url
+            type: text
+          - name: client_token
+            type: varchar(128)
+          - name: created_by
+            type: varchar(128)
+          - name: confirmed_by
+            type: varchar(128)
+          - name: confirm_note
+            type: text
+          - name: status
+            type: smallint
+            description: 支付状态（1-7，支付失败率口径的判定列）
+            enum_values:
+              - value: "1"
+                label: 待支付
+              - value: "2"
+                label: 支付成功
+              - value: "3"
+                label: 已过期
+              - value: "4"
+                label: 支付失败
+              - value: "5"
+                label: 已退款
+              - value: "6"
+                label: 部分退款
+              - value: "7"
+                label: 已关闭
+          - name: expires_at
+            type: timestamptz
+            description: 订单过期时间（超时未付自动过期）
+          - name: paid_at
+            type: timestamptz
+            description: 支付成功时间
+          - name: created_at
+            type: timestamptz
+            description: 支付单创建时间（支付失败率的时间轴）
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+              - value: unspecified
+                label: 未指定
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": payment_orders.org_id = wallet_accounts.org_id
+      - name: refund_orders
+        description: 退款单——支付退款申请与处理
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: refund_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: payment_order_id
+            type: varchar(128)
+            description: 关联支付单号
+          - name: amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: status
+            type: smallint
+            description: 退款状态（1-7）
+            enum_values:
+              - value: "1"
+                label: 待审批
+              - value: "2"
+                label: 已批准
+              - value: "3"
+                label: 已驳回
+              - value: "4"
+                label: 处理中
+              - value: "5"
+                label: 退款成功
+              - value: "6"
+                label: 退款失败
+              - value: "7"
+                label: 待重试
+          - name: reason
+            type: text
+            description: 退款原因
+          - name: reviewer_note
+            type: text
+          - name: reviewer_id
+            type: varchar(128)
+          - name: channel_refund_id
+            type: varchar(128)
+          - name: approved_at
+            type: timestamptz
+          - name: completed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: failure_code
+            type: varchar(64)
+            description: 退款失败错误码
+          - name: failure_message
+            type: text
+            description: 退款失败原因
+          - name: retry_count
+            type: integer
+          - name: next_retry_at
+            type: timestamptz
+          - name: last_retry_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+              - value: unspecified
+                label: 未指定
+          - name: actor_id
+            type: VARCHAR(64)
+          - name: actor_type
+            type: VARCHAR(32)
+          - name: refund_channel
+            type: smallint
+            description: 退款渠道
+        references:
+          - to: bss-wallet.wallet.payment_orders
+            "on": refund_orders.payment_order_id = payment_orders.order_id
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": refund_orders.org_id = wallet_accounts.org_id
+      - name: vouchers
+        description: 代金券——组织代金券余额池
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: voucher_id
+            type: varchar(128)
+            description: 代金券 ID
+          - name: org_id
+            type: varchar(36)
+          - name: name
+            type: varchar(128)
+          - name: total_amount
+            type: numeric(30,12)
+            description: 券总额
+          - name: remaining_amount
+            type: numeric(30,12)
+            description: 剩余金额
+          - name: currency
+            type: char(3)
+          - name: priority
+            type: smallint
+          - name: attribute_filters
+            type: jsonb
+          - name: source
+            type: smallint
+            description: 发放来源（1 营销活动/2 兑换码/3 人工）
+            enum_values:
+              - value: "1"
+                label: 营销活动
+              - value: "2"
+                label: 兑换码
+              - value: "3"
+                label: 人工发放
+          - name: status
+            type: smallint
+            description: 券状态（1-3）
+            enum_values:
+              - value: "1"
+                label: 生效中
+              - value: "2"
+                label: 已用尽
+              - value: "3"
+                label: 已过期
+          - name: effective_at
+            type: timestamptz
+            description: 生效时间
+            is_time: true
+          - name: expires_at
+            type: timestamptz
+            description: 过期时间
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: idempotency_key
+            type: varchar(255)
+          - name: request_fingerprint
+            type: varchar(64)
+          - name: metadata
+            type: jsonb
+          - name: used_at
+            type: timestamptz
+          - name: expired_at
+            type: timestamptz
+          - name: revoked_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": vouchers.org_id = wallet_accounts.org_id
+      - name: wallet_accounts
+        description: 钱包账户——组织余额/冻结/欠款额度
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+            description: 组织 ID（与 iam 组织的关联键）
+          - name: balance
+            type: numeric(30,12)
+            description: 可用余额
+          - name: frozen_amount
+            type: numeric(30,12)
+            description: 冻结金额
+          - name: debt_limit
+            type: numeric(30,12)
+            description: 欠款额度上限
+          - name: cumulative_recharge_amount
+            type: numeric(30,12)
+          - name: cumulative_deduction_amount
+            type: numeric(30,12)
+          - name: cumulative_refund_amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: status
+            type: smallint
+            description: 账户状态（1 正常/2 冻结/3 已注销）
+            enum_values:
+              - value: "1"
+                label: 正常
+              - value: "2"
+                label: 冻结
+              - value: "3"
+                label: 已注销
+          - name: alert_level
+            type: smallint
+            description: 余额告警级别（0 正常-3 欠款）
+            enum_values:
+              - value: "0"
+                label: 正常
+              - value: "1"
+                label: 余额低
+              - value: "2"
+                label: 余额耗尽
+              - value: "3"
+                label: 欠款
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+              - value: unspecified
+                label: 未指定
+      - name: wallet_outbox
+        description: 钱包事件 outbox——Kafka 可靠投递（事务性发件箱）
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: event_id
+            type: varchar(128)
+          - name: topic
+            type: varchar(128)
+          - name: partition_key
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: event_type
+            type: varchar(64)
+          - name: payload
+            type: jsonb
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: dead
+                label: 死信
+              - value: pending
+                label: 待处理
+              - value: processing
+                label: 处理中
+              - value: published
+                label: 已发布
+          - name: attempt_count
+            type: integer
+          - name: retry_count
+            type: integer
+          - name: available_at
+            type: timestamptz
+          - name: claimed_at
+            type: timestamptz
+          - name: claimed_by
+            type: varchar(128)
+          - name: claim_token
+            type: varchar(64)
+          - name: lease_expires_at
+            type: timestamptz
+          - name: published_at
+            type: timestamptz
+          - name: last_error
+            type: text
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": wallet_outbox.org_id = wallet_accounts.org_id
+      - name: wallet_transactions
+        description: 钱包流水——每笔余额变动（充值/扣费/退款等）
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: transaction_id
+            type: varchar(128)
+            description: 流水单号（唯一）
+          - name: org_id
+            type: varchar(36)
+          - name: tx_type
+            type: smallint
+            description: 流水类型（1-7）
+            enum_values:
+              - value: "1"
+                label: 充值
+              - value: "2"
+                label: 扣费
+              - value: "3"
+                label: 调整
+              - value: "4"
+                label: 退款
+              - value: "5"
+                label: 冻结
+              - value: "6"
+                label: 解冻
+              - value: "7"
+                label: 欠款抵扣
+          - name: amount
+            type: numeric(30,12)
+            description: 变动金额
+          - name: voucher_deducted
+            type: numeric(30,12)
+            description: 券抵扣金额
+          - name: balance_deducted
+            type: numeric(30,12)
+            description: 余额抵扣金额
+          - name: balance_before
+            type: numeric(30,12)
+          - name: balance_after
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: reference_type
+            type: varchar(32)
+            description: 关联业务类型
+          - name: reference_id
+            type: varchar(128)
+            description: 关联业务 ID
+          - name: ref_id
+            type: varchar(128)
+          - name: actor_id
+            type: varchar(128)
+          - name: description
+            type: text
+          - name: idempotency_key
+            type: varchar(128)
+          - name: line_results
+            type: jsonb
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": wallet_transactions.org_id = wallet_accounts.org_id

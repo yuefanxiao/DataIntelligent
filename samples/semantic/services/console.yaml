@@ -1,0 +1,708 @@
+version: 1
+service: console
+description: 控制台服务——审批流、客户运营、代金券发放与组织分组
+databases:
+  - name: console
+    description: 控制台库（public schema）——运营动作
+    tables:
+      - name: action_targets
+        description: 限流动作目标——动作作用的组织/分组
+        columns:
+          - name: id
+            type: bigint
+          - name: action_id
+            type: varchar(64)
+          - name: group_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: console.console.actions
+            "on": action_targets.action_id = actions.action_id
+          - to: console.console.org_groups
+            "on": action_targets.group_id = org_groups.group_id
+      - name: actions
+        description: 限流动作——发布到组织/分组的限流策略
+        columns:
+          - name: id
+            type: bigint
+          - name: action_id
+            type: varchar(64)
+          - name: action_type
+            type: varchar(64)
+          - name: target_mode
+            type: varchar(32)
+            enum_values:
+              - value: org_groups
+                label: 组织分组
+              - value: orgs
+                label: 组织
+          - name: parameters
+            type: jsonb
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: active
+                label: 生效中
+              - value: deleted
+                label: 已删除
+              - value: expire_failed
+                label: 过期失败
+              - value: expired
+                label: 已过期
+              - value: pending_publish
+                label: 待发布
+              - value: publish_failed
+                label: 发布失败
+          - name: effective_from
+            type: timestamptz
+          - name: effective_to
+            type: timestamptz
+          - name: apply_version
+            type: bigint
+          - name: expire_version
+            type: bigint
+          - name: retry_count
+            type: integer
+          - name: next_retry_at
+            type: timestamptz
+          - name: last_error
+            type: varchar(1024)
+          - name: created_by
+            type: varchar(128)
+          - name: updated_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: approval_cases
+        description: 审批实例——审批流的一次审批（含执行结果）
+        columns:
+          - name: id
+            type: bigint
+          - name: approval_id
+            type: varchar(64)
+            description: 审批单号
+          - name: template_code
+            type: varchar(64)
+            description: 审批模板编码
+          - name: action_type
+            type: varchar(128)
+            description: 动作类型（如 refund.review）
+          - name: initiator_type
+            type: varchar(16)
+            enum_values:
+              - value: system
+                label: 系统
+              - value: user
+                label: 用户
+          - name: initiator_id
+            type: varchar(128)
+          - name: wecom_sp_no
+            type: varchar(128)
+          - name: wecom_status
+            type: varchar(32)
+            description: 企微审批状态
+            enum_values:
+              - value: approved
+                label: 已通过
+              - value: canceled
+                label: 已取消
+              - value: local_created
+                label: 本地创建
+              - value: processing
+                label: 处理中
+              - value: rejected
+                label: 已驳回
+              - value: submitted
+                label: 已提交
+              - value: unknown
+                label: 未知
+          - name: execute_status
+            type: varchar(32)
+            description: 执行状态
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: manual_required
+                label: 需人工
+              - value: not_required
+                label: 无需执行
+              - value: pending
+                label: 待执行
+              - value: running
+                label: 执行中
+              - value: skipped
+                label: 已跳过
+              - value: succeeded
+                label: 成功
+          - name: business_type
+            type: varchar(64)
+            description: 业务类型
+          - name: business_id
+            type: varchar(128)
+            description: 业务 ID
+          - name: resource_type
+            type: varchar(64)
+          - name: resource_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(128)
+          - name: idempotency_key
+            type: varchar(255)
+          - name: payload_version
+            type: integer
+          - name: payload_snapshot
+            type: jsonb
+          - name: last_sync_at
+            type: timestamp with time zone
+          - name: last_error_code
+            type: varchar(64)
+          - name: last_error_message
+            type: text
+          - name: created_at
+            type: timestamp with time zone
+            is_time: true
+          - name: updated_at
+            type: timestamp with time zone
+      - name: approval_events
+        description: 审批事件流水
+        columns:
+          - name: id
+            type: bigint
+          - name: approval_id
+            type: varchar(64)
+          - name: event_type
+            type: varchar(64)
+          - name: message
+            type: text
+          - name: metadata
+            type: jsonb
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+      - name: approval_execution_logs
+        description: 审批执行日志
+        columns:
+          - name: id
+            type: bigint
+          - name: approval_id
+            type: varchar(64)
+          - name: executor_name
+            type: varchar(128)
+          - name: target_service
+            type: varchar(128)
+          - name: idempotency_key
+            type: varchar(255)
+          - name: attempt
+            type: integer
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: manual_required
+                label: 需人工
+              - value: running
+                label: 执行中
+              - value: succeeded
+                label: 成功
+          - name: error_code
+            type: varchar(64)
+          - name: error_message
+            type: text
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+          - name: finished_at
+            type: timestamp with time zone
+      - name: approval_leases
+        description: 审批租约——执行者租约
+        columns:
+          - name: lease_key
+            type: varchar(64)
+          - name: owner_token
+            type: varchar(128)
+          - name: expires_at
+            type: timestamp with time zone
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+      - name: approval_templates
+        description: 审批模板——企微审批模板定义
+        columns:
+          - name: id
+            type: bigint
+          - name: template_code
+            type: varchar(64)
+          - name: wecom_template_id
+            type: varchar(128)
+          - name: action_type
+            type: varchar(128)
+          - name: initiator_policy
+            type: varchar(16)
+            enum_values:
+              - value: system
+                label: 系统发起
+              - value: user
+                label: 用户发起
+              - value: user_or_system
+                label: 用户或系统
+          - name: enabled
+            type: boolean
+          - name: description
+            type: text
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+          - name: display_name
+            type: varchar(64)
+          - name: business_domain
+            type: varchar(64)
+      - name: console_consumption_export_operations
+        description: 消费导出任务
+        columns:
+          - name: id
+            type: BIGINT
+          - name: operation_id
+            type: VARCHAR(64)
+          - name: export_type
+            type: VARCHAR(64)
+          - name: status
+            type: VARCHAR(48)
+          - name: file_name
+            type: VARCHAR(512)
+          - name: oss_object_key
+            type: VARCHAR(512)
+          - name: oss_content_type
+            type: VARCHAR(128)
+          - name: file_size_bytes
+            type: BIGINT
+          - name: filter_snapshot
+            type: TEXT
+          - name: filter_hash
+            type: VARCHAR(128)
+          - name: expires_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: lease_until
+            type: TIMESTAMP WITH TIME ZONE
+          - name: owner_token
+            type: VARCHAR(64)
+          - name: created_by
+            type: VARCHAR(64)
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: finished_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: error_message
+            type: TEXT
+          - name: identity_snapshot
+            type: TEXT
+      - name: customer_operations
+        description: 客户运营操作——状态变更/备注更新
+        columns:
+          - name: id
+            type: bigint
+          - name: operation_id
+            type: varchar(64)
+          - name: customer_id
+            type: varchar(128)
+          - name: operation_type
+            type: varchar(64)
+            enum_values:
+              - value: note_update
+                label: 备注更新
+              - value: status_update
+                label: 状态变更
+          - name: resource_type
+            type: varchar(64)
+          - name: resource_id
+            type: varchar(128)
+          - name: action
+            type: varchar(128)
+          - name: summary
+            type: text
+          - name: detail
+            type: text
+          - name: operator_user_id
+            type: varchar(128)
+          - name: operator_username
+            type: varchar(128)
+          - name: approval_id
+            type: varchar(64)
+          - name: result
+            type: varchar(32)
+            enum_values:
+              - value: canceled
+                label: 已取消
+              - value: executable
+                label: 可执行
+              - value: failed
+                label: 失败
+              - value: pending
+                label: 待处理
+              - value: rejected
+                label: 已驳回
+              - value: succeeded
+                label: 成功
+          - name: created_at
+            type: timestamp with time zone
+            is_time: true
+          - name: updated_at
+            type: timestamp with time zone
+      - name: customer_profiles
+        description: 客户档案——运营侧客户视图
+        columns:
+          - name: id
+            type: bigint
+          - name: customer_id
+            type: varchar(128)
+          - name: note
+            type: text
+          - name: operator_user_id
+            type: varchar(128)
+          - name: operator_username
+            type: varchar(128)
+          - name: created_at
+            type: timestamp with time zone
+          - name: updated_at
+            type: timestamp with time zone
+      - name: org_group_members
+        description: 组织分组成员
+        columns:
+          - name: id
+            type: bigint
+          - name: group_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+          - name: joined_at
+            type: timestamptz
+          - name: created_by
+            type: varchar(128)
+          - name: updated_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+          - name: apply_version
+            type: bigint
+          - name: rate_limit_synced_version
+            type: bigint
+          - name: rate_limit_sync_error
+            type: varchar(1024)
+        references:
+          - to: console.console.org_groups
+            "on": org_group_members.group_id = org_groups.group_id
+      - name: org_groups
+        description: 组织分组——客户分组
+        columns:
+          - name: id
+            type: bigint
+          - name: group_id
+            type: varchar(64)
+          - name: name
+            type: varchar(128)
+          - name: created_by
+            type: varchar(128)
+          - name: updated_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: voucher_auto_issue_rules
+        description: 代金券自动发放规则
+        columns:
+          - name: id
+            type: bigint
+          - name: auto_rule_id
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: trigger_event_type
+            type: varchar(64)
+          - name: trigger_conditions
+            type: jsonb
+          - name: total_issue_limit
+            type: bigint
+          - name: per_org_issue_limit
+            type: bigint
+          - name: per_org_trigger_limit
+            type: bigint
+          - name: total_reserved_count
+            type: bigint
+          - name: total_succeeded_count
+            type: bigint
+          - name: voucher_spec
+            type: jsonb
+          - name: reason
+            type: text
+          - name: create_approval_id
+            type: varchar(64)
+          - name: create_approval_sp_no
+            type: varchar(128)
+          - name: terminate_approval_id
+            type: varchar(64)
+          - name: terminate_approval_sp_no
+            type: varchar(128)
+          - name: payload_snapshot
+            type: jsonb
+          - name: created_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: terminate_attempt_count
+            type: bigint
+      - name: voucher_auto_rule_event_counters
+        description: 自动发放规则事件计数
+        columns:
+          - name: id
+            type: bigint
+          - name: auto_rule_id
+            type: varchar(64)
+          - name: trigger_event_id
+            type: varchar(128)
+          - name: reserved_count
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: voucher_auto_rule_org_counters
+        description: 自动发放规则组织计数
+        columns:
+          - name: id
+            type: bigint
+          - name: auto_rule_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(128)
+          - name: reserved_count
+            type: bigint
+          - name: succeeded_count
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: voucher_bulk_issue_jobs
+        description: 代金券批量发放任务
+        columns:
+          - name: id
+            type: bigint
+          - name: bulk_job_id
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: target_source
+            type: varchar(32)
+          - name: target_manifest_id
+            type: varchar(128)
+          - name: target_scope
+            type: varchar(128)
+          - name: target_count
+            type: bigint
+          - name: target_manifest_hash
+            type: varchar(128)
+          - name: sample_org_ids
+            type: jsonb
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: voucher_issue_batches
+        description: 代金券发放批次
+        columns:
+          - name: id
+            type: bigint
+          - name: batch_id
+            type: varchar(64)
+          - name: issue_mode
+            type: varchar(16)
+          - name: manual_rule_id
+            type: varchar(64)
+          - name: auto_rule_id
+            type: varchar(64)
+          - name: bulk_job_id
+            type: varchar(64)
+          - name: trigger_event_type
+            type: varchar(64)
+          - name: trigger_event_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(128)
+          - name: status
+            type: varchar(32)
+          - name: total_count
+            type: bigint
+          - name: succeeded_count
+            type: bigint
+          - name: failed_count
+            type: bigint
+          - name: payload_snapshot
+            type: jsonb
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: voucher_issue_details
+        description: 代金券发放明细——发放结果与钱包代金券关联
+        columns:
+          - name: id
+            type: bigint
+          - name: detail_id
+            type: varchar(64)
+          - name: batch_id
+            type: varchar(64)
+          - name: issue_mode
+            type: varchar(16)
+          - name: manual_rule_id
+            type: varchar(64)
+          - name: auto_rule_id
+            type: varchar(64)
+          - name: bulk_job_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(128)
+          - name: trigger_event_type
+            type: varchar(64)
+          - name: trigger_event_id
+            type: varchar(128)
+          - name: idempotency_key
+            type: varchar(255)
+          - name: wallet_voucher_id
+            type: varchar(128)
+            description: 钱包代金券 ID（关联 bss-wallet vouchers）
+          - name: status
+            type: varchar(32)
+          - name: error_code
+            type: varchar(64)
+          - name: error_message
+            type: text
+          - name: attempt_count
+            type: int
+          - name: payload_snapshot
+            type: jsonb
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: voucher_manual_issue_rules
+        description: 代金券人工发放规则
+        columns:
+          - name: id
+            type: bigint
+          - name: manual_rule_id
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: target_source
+            type: varchar(32)
+          - name: org_ids
+            type: jsonb
+          - name: target_manifest_id
+            type: varchar(128)
+          - name: target_scope
+            type: varchar(128)
+          - name: target_count
+            type: bigint
+          - name: target_manifest_hash
+            type: varchar(128)
+          - name: sample_org_ids
+            type: jsonb
+          - name: voucher_spec
+            type: jsonb
+          - name: reason
+            type: text
+          - name: approval_id
+            type: varchar(64)
+          - name: payload_snapshot
+            type: jsonb
+          - name: created_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: customer_group_ids
+            type: jsonb
+      - name: voucher_redeem_code_campaign_requests
+        description: 兑换活动审批申请——活动上线审批
+        columns:
+          - name: id
+            type: bigint
+          - name: campaign_id
+            type: varchar(64)
+          - name: campaign_name
+            type: varchar(128)
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: active
+                label: 生效
+              - value: expired
+                label: 已过期
+              - value: pending_approval
+                label: 待审批
+              - value: rejected
+                label: 已驳回
+              - value: terminated
+                label: 已终止
+          - name: promotion_campaign_id
+            type: varchar(128)
+          - name: promotion_batch_id
+            type: varchar(128)
+          - name: voucher_spec
+            type: jsonb
+          - name: code_count
+            type: bigint
+          - name: campaign_valid_from
+            type: timestamptz
+          - name: campaign_valid_until
+            type: timestamptz
+          - name: reason
+            type: text
+          - name: approval_id
+            type: varchar(64)
+          - name: approval_sp_no
+            type: varchar(128)
+          - name: payload_snapshot
+            type: jsonb
+          - name: created_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: code_prefix
+            type: varchar(16)

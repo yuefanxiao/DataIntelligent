@@ -1,0 +1,218 @@
+version: 1
+service: notification
+description: 通知服务——公告、邮件模板与投递
+databases:
+  - name: notification
+    description: 通知库（public schema）——公告与邮件投递
+    tables:
+      - name: announcement_operation_logs
+        description: 公告操作日志
+        columns:
+          - name: id
+            type: bigint
+          - name: announcement_id
+            type: varchar(64)
+          - name: operation
+            type: varchar(32)
+          - name: operator_id
+            type: varchar(64)
+          - name: reason
+            type: varchar(500)
+          - name: detail
+            type: text
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+        references:
+          - to: notification.notification.announcements
+            "on": announcement_operation_logs.announcement_id = announcements.announcement_id
+      - name: announcements
+        description: 公告——发布审核与生命周期
+        columns:
+          - name: id
+            type: bigint
+          - name: announcement_id
+            type: varchar(64)
+          - name: title
+            type: varchar(50)
+          - name: summary
+            type: varchar(80)
+          - name: content
+            type: text
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: canceled
+                label: 已取消
+              - value: pending_publish
+                label: 待发布
+              - value: pending_review
+                label: 待审核
+              - value: publish_failed
+                label: 发布失败
+              - value: published
+                label: 已发布
+              - value: retired
+                label: 已下架
+              - value: review_approved
+                label: 审核通过
+              - value: review_canceled
+                label: 审核取消
+              - value: review_failed
+                label: 审核失败
+              - value: review_rejected
+                label: 审核驳回
+          - name: scheduled_publish_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: published_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: retired_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: retired_by
+            type: varchar(64)
+          - name: retire_reason
+            type: varchar(500)
+          - name: canceled_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: canceled_by
+            type: varchar(64)
+          - name: cancel_reason
+            type: varchar(500)
+          - name: failure_detail
+            type: text
+          - name: created_by
+            type: varchar(64)
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+            is_time: true
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: email_deliveries
+        description: 邮件投递——业务邮件发送记录
+        columns:
+          - name: id
+            type: bigint
+          - name: delivery_id
+            type: varchar(64)
+          - name: source_service
+            type: varchar(128)
+            description: 来源服务
+          - name: org_id
+            type: varchar(64)
+          - name: business_key
+            type: varchar(128)
+          - name: template_code
+            type: varchar(128)
+            description: 模板编码
+          - name: template_version
+            type: integer
+          - name: recipient_email
+            type: varchar(255)
+            description: 收件邮箱
+          - name: variables_json
+            type: text
+          - name: subject_snapshot
+            type: text
+          - name: html_snapshot
+            type: text
+          - name: status
+            type: varchar(32)
+            description: 投递状态
+            enum_values:
+              - value: canceled
+                label: 已取消
+              - value: failed
+                label: 失败
+              - value: pending
+                label: 待发送
+              - value: sending
+                label: 发送中
+              - value: succeeded
+                label: 成功
+          - name: attempt_count
+            type: integer
+          - name: max_attempts
+            type: integer
+          - name: next_attempt_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: last_error
+            type: text
+          - name: idempotency_key
+            type: varchar(255)
+          - name: requested_send_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: created_by_operator_id
+            type: varchar(64)
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+            is_time: true
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: sent_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: canceled_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: email_delivery_attempts
+        description: 投递尝试——单次发送尝试与错误
+        columns:
+          - name: id
+            type: bigint
+          - name: attempt_id
+            type: varchar(64)
+          - name: delivery_id
+            type: varchar(64)
+          - name: provider
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: sending
+                label: 发送中
+              - value: succeeded
+                label: 成功
+          - name: error_message
+            type: text
+          - name: started_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: finished_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+        references:
+          - to: notification.notification.email_deliveries
+            "on": email_delivery_attempts.delivery_id = email_deliveries.delivery_id
+      - name: email_templates
+        description: 邮件模板
+        columns:
+          - name: id
+            type: bigint
+          - name: template_code
+            type: varchar(128)
+          - name: version
+            type: integer
+          - name: name
+            type: varchar(128)
+          - name: subject_template
+            type: text
+          - name: html_template
+            type: text
+          - name: required_variables
+            type: text
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: active
+                label: 启用
+              - value: inactive
+                label: 停用
+          - name: tenant_scoped
+            type: boolean
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE

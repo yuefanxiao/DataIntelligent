@@ -1,0 +1,178 @@
+version: 1
+service: bss-promotion
+description: 营销服务——兑换码与兑换活动
+databases:
+  - name: promotion
+    description: 营销库（schema promotion）——兑换码批次/码/兑换记录
+    tables:
+      - name: code_batches
+        description: 兑换码批次
+        schema: promotion
+        columns:
+          - name: id
+            type: bigserial
+          - name: batch_id
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: channel
+            type: varchar(64)
+          - name: effect_type
+            type: varchar(32)
+            enum_values:
+              - value: MARKETING
+                label: 营销
+              - value: VOUCHER_REDEEM
+                label: 代金券兑换
+          - name: code_mode
+            type: varchar(16)
+            enum_values:
+              - value: shared
+                label: 共享码
+              - value: unique
+                label: 唯一码
+          - name: valid_until
+            type: timestamptz
+          - name: total_count
+            type: integer
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 生效
+              - value: terminated
+                label: 已终止
+          - name: created_by_user_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+      - name: code_redemptions
+        description: 兑换记录——兑换尝试与钱包发放结果（失败归因）
+        schema: promotion
+        columns:
+          - name: id
+            type: bigserial
+          - name: redemption_id
+            type: varchar(64)
+          - name: campaign_id
+            type: varchar(64)
+          - name: code_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(128)
+            description: 组织 ID
+          - name: status
+            type: varchar(16)
+            description: 兑换状态
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: processing
+                label: 处理中
+              - value: succeeded
+                label: 成功
+          - name: request_id
+            type: varchar(128)
+          - name: wallet_batch_id
+            type: varchar(128)
+          - name: wallet_voucher_id
+            type: varchar(128)
+          - name: wallet_error_code
+            type: varchar(64)
+            description: 钱包发放错误码
+          - name: wallet_error_message
+            type: text
+            description: 钱包发放错误信息
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+      - name: codes
+        description: 兑换码
+        schema: promotion
+        columns:
+          - name: id
+            type: bigserial
+          - name: code_id
+            type: varchar(64)
+          - name: batch_id
+            type: varchar(64)
+          - name: campaign_id
+            type: varchar(64)
+          - name: code_hash
+            type: varchar(128)
+          - name: code_hash_version
+            type: integer
+          - name: code_plaintext
+            type: varchar(256)
+          - name: masked_code
+            type: varchar(32)
+          - name: code_last4
+            type: varchar(8)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 可用
+              - value: reserved
+                label: 已预留
+              - value: revoked
+                label: 已撤销
+              - value: used
+                label: 已使用
+          - name: max_redemption_count
+            type: integer
+          - name: redemption_count
+            type: integer
+          - name: valid_until
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: redeem_code_campaigns
+        description: 兑换活动
+        schema: promotion
+        columns:
+          - name: id
+            type: bigserial
+          - name: campaign_id
+            type: varchar(64)
+          - name: approval_id
+            type: varchar(64)
+          - name: batch_id
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: code_prefix
+            type: varchar(16)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 生效中
+              - value: expired
+                label: 已过期
+              - value: terminated
+                label: 已终止
+          - name: total_count
+            type: integer
+          - name: redeemed_count
+            type: integer
+          - name: campaign_valid_from
+            type: timestamptz
+          - name: campaign_valid_until
+            type: timestamptz
+          - name: voucher_snapshot
+            type: jsonb
+          - name: created_by_user_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz

@@ -1,16 +1,75 @@
-# 全局业务概念（样例）——业务语言的入口（双入口检索：搜「支付失败」命中概念）。
+# 全局业务概念（neo-cloud 真实业务语言）——双入口检索的语义入口
+# （搜「支付失败」命中概念 → 概念 describes 指向表/列/指标）。
 #
 # 约定：概念 FQN = 单段名字（独立命名空间）；describes 指向表/列/指标
 # （describes 边，编译期校验引用完整性；概念授权展开为这些实体的表授权）。
 version: 1
 concepts:
-  - name: payment_failure
-    description: 支付失败——支付单状态为 failed 的业务情形
-    describes:
-      - payment-service.payment_db.payments.status
-      - payment_failure_rate
   - name: payment_order
-    description: 支付订单——支付单与其关联订单的业务对象
+    description: 支付单——客户充值支付订单（钱包充值入口）
     describes:
-      - payment-service.payment_db.payments
-      - order-service.order_db.orders
+      - bss-wallet.wallet.payment_orders
+      - bss-wallet.wallet.payment_orders.status
+      - payment_failure_rate
+  - name: payment_failure
+    description: 支付失败——支付单状态为支付失败（4）的业务情形，主用例「昨天支付失败率为什么上涨」的入口
+    describes:
+      - bss-wallet.wallet.payment_orders.status
+      - payment_failure_rate
+  - name: refund_order
+    description: 退款单——支付退款申请与处理结果
+    describes:
+      - bss-wallet.wallet.refund_orders
+  - name: wallet_account
+    description: 钱包账户——组织余额、冻结与欠款额度
+    describes:
+      - bss-wallet.wallet.wallet_accounts
+  - name: wallet_transaction
+    description: 钱包流水——每笔余额变动（充值/扣费/退款/调整等）
+    describes:
+      - bss-wallet.wallet.wallet_transactions
+  - name: voucher
+    description: 代金券——营销发放的抵扣券余额池
+    describes:
+      - bss-wallet.wallet.vouchers
+  - name: bill
+    description: 账单——每次用量计费生成的账单明细
+    describes:
+      - bss-bill.bill.bills
+  - name: settlement
+    description: 结算——组织结算周期与钱包扣费（扣费失败归因：结算批次/尝试）
+    describes:
+      - bss-bill.bill.settlement_batches
+      - bss-bill.bill.settlement_attempts
+  - name: organization
+    description: 组织（客户）——平台客户档案，跨服务 org_id 的语义锚点
+    describes:
+      - iam.iam.organizations
+  - name: user_account
+    description: 用户账号——平台用户
+    describes:
+      - iam.iam.users
+  - name: api_credential
+    description: API 凭据——访问平台的 API key（账单归属键）
+    describes:
+      - iam.iam.api_credentials
+  - name: invoice_application
+    description: 开票申请——客户发票申请单
+    describes:
+      - bss-invoice.bss_invoice.invoice_applications
+  - name: audit_log
+    description: 审计日志——平台操作审计
+    describes:
+      - iam-audit.iam_audit.audit_logs
+  - name: support_ticket
+    description: 工单——客户支持工单
+    describes:
+      - ops-ticket.ops_ticket.support_tickets
+  - name: approval_case
+    description: 审批——企微审批流实例（退款/发券/上架等动作的审批）
+    describes:
+      - console.console.approval_cases
+  - name: model_pricing
+    description: 模型定价——模型×计量项的价格
+    describes:
+      - bss-subscription.subscription.model_pricing

@@ -1,0 +1,4 @@
+version: 1
+service: ops-operation
+description: 运营编排服务——工单/审批等运营动作的编排层（无持库，纯编排）
+databases: []

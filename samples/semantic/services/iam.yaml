@@ -1,0 +1,709 @@
+version: 1
+service: iam
+description: 身份与访问服务——用户、组织、成员、API 凭据与权限（RBAC）
+databases:
+  - name: iam
+    description: 身份库（public schema）——账号/组织/凭据
+    tables:
+      - name: api_credentials
+        description: API 凭据——访问网关的 API key（与 bill.api_key_id 关联）
+        columns:
+          - name: id
+            type: bigserial
+          - name: key_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+            description: 所属组织 ID
+          - name: owner_user_id
+            type: varchar(64)
+            description: 属主用户 ID
+          - name: name
+            type: varchar(255)
+            description: 凭据名称
+          - name: key_prefix
+            type: varchar(8)
+            description: key 前缀
+          - name: secret_sha256
+            type: bytea
+          - name: secret_encrypted
+            type: bytea
+          - name: status
+            type: varchar(32)
+            description: 凭据状态
+            enum_values:
+              - value: active
+                label: 启用
+              - value: deleted
+                label: 已删除
+              - value: inactive
+                label: 停用
+          - name: inactive_reason
+            type: varchar(64)
+          - name: identity_status
+            type: varchar(32)
+            description: 实名认证状态
+            enum_values:
+              - value: approved
+                label: 已认证
+              - value: pending
+                label: 认证中
+              - value: rejected
+                label: 认证驳回
+              - value: unverified
+                label: 未认证
+          - name: deleted_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+      - name: casbin_rules
+        description: Casbin 策略——RBAC 策略规则表（ptype p/g）
+        columns:
+          - name: id
+            type: bigserial
+          - name: ptype
+            type: varchar(100)
+          - name: v0
+            type: varchar(255)
+          - name: v1
+            type: varchar(255)
+          - name: v2
+            type: varchar(255)
+          - name: v3
+            type: varchar(255)
+          - name: v4
+            type: varchar(255)
+          - name: v5
+            type: varchar(255)
+      - name: invite_codes
+        description: 邀请码
+        columns:
+          - name: id
+            type: bigserial
+          - name: invite_code_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: code
+            type: varchar(8)
+          - name: code_upper
+            type: varchar(8)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 可用
+              - value: revoked
+                label: 已撤销
+          - name: revoked_at
+            type: timestamptz
+          - name: revoked_reason
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: iam.iam.users
+            "on": invite_codes.user_id = users.user_id
+      - name: invite_configs
+        description: 邀请配置——热切换 KV（beta 开关/成员上限等）
+        columns:
+          - name: id
+            type: bigserial
+          - name: config_id
+            type: varchar(64)
+          - name: key
+            type: varchar(64)
+          - name: value
+            type: varchar(256)
+          - name: description
+            type: varchar(256)
+          - name: updated_by
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: migration_0007_org_group_cleanup_rollback_casbin_rules
+        description: 迁移回滚表——组织分组清理回滚的 casbin 规则快照（纯迁移数据）
+        columns:
+          - name: ptype
+            type: varchar(100)
+          - name: v0
+            type: varchar(255)
+          - name: v1
+            type: varchar(255)
+          - name: v2
+            type: varchar(255)
+          - name: v3
+            type: varchar(255)
+          - name: v4
+            type: varchar(255)
+          - name: v5
+            type: varchar(255)
+      - name: migration_0007_org_group_cleanup_rollback_permissions
+        description: 迁移回滚表——组织分组清理回滚的权限快照（纯迁移数据）
+        columns:
+          - name: permission_id
+            type: varchar(64)
+          - name: key
+            type: varchar(128)
+          - name: description
+            type: varchar(256)
+          - name: resource
+            type: varchar(128)
+          - name: action
+            type: varchar(64)
+          - name: effect
+            type: varchar(16)
+      - name: migration_0007_org_group_cleanup_rollback_role_permissions
+        description: 迁移回滚表——组织分组清理回滚的角色权限快照（纯迁移数据）
+        columns:
+          - name: role_id
+            type: varchar(64)
+          - name: permission_id
+            type: varchar(64)
+      - name: org_invite_links
+        description: 组织邀请链接
+        columns:
+          - name: id
+            type: bigserial
+          - name: org_invite_link_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: token
+            type: varchar(64)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 有效
+              - value: disabled
+                label: 停用
+              - value: refreshed
+                label: 已刷新
+              - value: revoked
+                label: 已撤销
+          - name: created_by_user_id
+            type: varchar(64)
+          - name: created_by_role_id
+            type: varchar(64)
+            enum_values:
+              - value: org_admin
+                label: 组织管理员
+          - name: refreshed_by_user_id
+            type: varchar(64)
+          - name: revoked_by_user_id
+            type: varchar(64)
+          - name: disabled_by_event
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: refreshed_at
+            type: timestamptz
+          - name: revoked_at
+            type: timestamptz
+          - name: disabled_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: iam.iam.organizations
+            "on": org_invite_links.org_id = organizations.organization_id
+          - to: iam.iam.users
+            "on": org_invite_links.created_by_user_id = users.user_id
+          - to: iam.iam.users
+            "on": org_invite_links.refreshed_by_user_id = users.user_id
+          - to: iam.iam.users
+            "on": org_invite_links.revoked_by_user_id = users.user_id
+      - name: org_join_applications
+        description: 加入组织申请
+        columns:
+          - name: id
+            type: bigserial
+          - name: org_join_application_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: org_invite_link_id
+            type: varchar(64)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: approved
+                label: 已批准
+              - value: cancelled
+                label: 已取消
+              - value: expired
+                label: 已过期
+              - value: pending
+                label: 待处理
+              - value: rejected
+                label: 已拒绝
+          - name: reviewed_by
+            type: varchar(64)
+          - name: reviewed_at
+            type: timestamptz
+          - name: reject_reason
+            type: varchar(500)
+          - name: active_pending_org_id
+            type: varchar(64)
+          - name: active_pending_user_id
+            type: varchar(64)
+          - name: expires_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: iam.iam.org_invite_links
+            "on": org_join_applications.org_invite_link_id = org_invite_links.org_invite_link_id
+          - to: iam.iam.organizations
+            "on": org_join_applications.org_id = organizations.organization_id
+          - to: iam.iam.users
+            "on": org_join_applications.reviewed_by = users.user_id
+          - to: iam.iam.users
+            "on": org_join_applications.user_id = users.user_id
+      - name: organization_invitations
+        description: 组织成员邀请
+        columns:
+          - name: id
+            type: bigserial
+          - name: invitation_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+          - name: email
+            type: varchar(255)
+          - name: status
+            type: varchar(32)
+          - name: expired_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: organization_memberships
+        description: 组织成员关系——组织↔用户成员
+        columns:
+          - name: id
+            type: bigserial
+          - name: organization_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: organization_nickname
+            type: varchar(64)
+          - name: role_id
+            type: varchar(64)
+          - name: joined_at
+            type: timestamptz
+            is_time: true
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: organizations
+        description: 组织（客户）——组织档案与实名/企业认证状态
+        columns:
+          - name: id
+            type: bigserial
+          - name: organization_id
+            type: varchar(64)
+            description: 组织 ID（跨库关联键：wallet/bill/console 的 org_id）
+          - name: name
+            type: varchar(255)
+            description: 组织名称
+          - name: avatar_url
+            type: varchar(512)
+          - name: status
+            type: varchar(32)
+            description: 组织状态
+            enum_values:
+              - value: active
+                label: 正常
+              - value: cancelling
+                label: 注销中
+              - value: deleted
+                label: 已删除
+              - value: frozen
+                label: 冻结
+          - name: organization_type
+            type: varchar(32)
+            description: 组织类型（个人/团队）
+            enum_values:
+              - value: individual
+                label: 个人
+              - value: team
+                label: 团队
+          - name: owner_user_id
+            type: varchar(64)
+            description: 属主用户 ID
+          - name: policy_version
+            type: bigint
+          - name: realname_status
+            type: varchar(32)
+            description: 实名认证状态
+            enum_values:
+              - value: approved
+                label: 已通过
+              - value: pending
+                label: 审核中
+              - value: rejected
+                label: 已驳回
+              - value: unverified
+                label: 未实名
+          - name: enterprise_cert_status
+            type: varchar(32)
+            description: 企业认证状态
+            enum_values:
+              - value: approved
+                label: 已通过
+              - value: pending
+                label: 审核中
+              - value: rejected
+                label: 已驳回
+              - value: unverified
+                label: 未认证
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: permissions
+        description: 权限点——权限 key 定义（如 console:org_group.read）
+        columns:
+          - name: id
+            type: bigserial
+          - name: permission_id
+            type: varchar(64)
+          - name: key
+            type: varchar(255)
+          - name: description
+            type: varchar(1024)
+          - name: resource
+            type: varchar(255)
+          - name: action
+            type: varchar(128)
+          - name: effect
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: personal_invite_relations
+        description: 个人邀请关系——推荐人与被邀请人
+        columns:
+          - name: id
+            type: bigserial
+          - name: personal_invite_relation_id
+            type: varchar(64)
+          - name: inviter_user_id
+            type: varchar(64)
+          - name: invitee_user_id
+            type: varchar(64)
+          - name: invite_code
+            type: varchar(8)
+          - name: source
+            type: varchar(32)
+            enum_values:
+              - value: manual_input
+                label: 手动录入
+              - value: org_link_embedded
+                label: 组织链接内嵌
+              - value: personal_link
+                label: 个人链接
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: invalid
+                label: 无效
+              - value: registered
+                label: 已注册
+          - name: invalid_reason
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: iam.iam.users
+            "on": personal_invite_relations.invitee_user_id = users.user_id
+          - to: iam.iam.users
+            "on": personal_invite_relations.inviter_user_id = users.user_id
+      - name: registration_code_batches
+        description: 注册码批次
+        columns:
+          - name: id
+            type: bigserial
+          - name: batch_id
+            type: varchar(64)
+          - name: name
+            type: varchar(128)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 生效
+              - value: terminated
+                label: 已终止
+          - name: max_uses
+            type: int
+          - name: total_count
+            type: int
+          - name: valid_until
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: registration_codes
+        description: 注册码
+        columns:
+          - name: id
+            type: bigserial
+          - name: registration_code_id
+            type: varchar(64)
+          - name: batch_id
+            type: varchar(64)
+          - name: code_hash
+            type: varchar(128)
+          - name: code_last4
+            type: varchar(8)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+                label: 可用
+              - value: revoked
+                label: 已撤销
+              - value: used
+                label: 已使用
+          - name: max_uses
+            type: int
+          - name: used_count
+            type: int
+          - name: valid_until
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: role_permissions
+        description: 角色权限关联
+        columns:
+          - name: id
+            type: bigserial
+          - name: role_id
+            type: varchar(64)
+          - name: permission_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: roles
+        description: 角色
+        columns:
+          - name: id
+            type: bigserial
+          - name: role_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+          - name: role_code
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: description
+            type: varchar(1024)
+          - name: builtin
+            type: boolean
+          - name: status
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: user_cancellations
+        description: 用户注销——注销申请与物理删除状态
+        columns:
+          - name: id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(128)
+          - name: individual_organization_id
+            type: varchar(128)
+          - name: cancellation_type
+            type: varchar(32)
+            enum_values:
+              - value: platform_forced
+                label: 平台强制
+              - value: user_requested
+                label: 用户申请
+          - name: reason
+            type: varchar(128)
+          - name: source
+            type: varchar(32)
+            enum_values:
+              - value: ops
+                label: 运营
+              - value: system
+                label: 系统
+              - value: user
+                label: 用户
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: deleting
+                label: 删除中
+              - value: pending_physical_deletion
+                label: 待物理删除
+              - value: physically_deleted
+                label: 已物理删除
+              - value: restored
+                label: 已恢复
+          - name: effective_at
+            type: timestamptz
+          - name: soft_delete_after
+            type: timestamptz
+          - name: restored_at
+            type: timestamptz
+          - name: restored_by
+            type: varchar(128)
+          - name: physically_deleted_at
+            type: timestamptz
+          - name: primary_violation_user_id
+            type: varchar(128)
+          - name: linked_source
+            type: varchar(128)
+          - name: linked_evidence
+            type: text
+          - name: note
+            type: text
+          - name: last_failure_reason
+            type: varchar(128)
+          - name: last_failure_message
+            type: text
+          - name: last_failed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+      - name: users
+        description: 用户账号
+        columns:
+          - name: id
+            type: bigserial
+          - name: user_id
+            type: varchar(64)
+            description: 用户 ID（跨库关联键：bill.user_id 等）
+          - name: email
+            type: varchar(255)
+            description: 邮箱
+          - name: password_hash
+            type: varchar(255)
+          - name: mobile
+            type: varchar(32)
+            description: 手机号
+          - name: status
+            type: varchar(32)
+            description: 账号状态
+          - name: username
+            type: varchar(128)
+            description: 用户名
+          - name: avatar_url
+            type: varchar(512)
+          - name: frozen_at
+            type: timestamptz
+          - name: deleted_at_unix
+            type: bigint
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: registration_code_id
+            type: varchar(64)
+      - name: verifications
+        description: 实名认证记录（KYC）
+        columns:
+          - name: id
+            type: bigserial
+          - name: verification_id
+            type: varchar(64)
+          - name: subject_type
+            type: varchar(32)
+            enum_values:
+              - value: organization
+                label: 组织
+              - value: user
+                label: 用户
+          - name: subject_id
+            type: varchar(64)
+          - name: actor_user_id
+            type: varchar(64)
+          - name: type
+            type: varchar(32)
+          - name: subject_name
+            type: varchar(255)
+          - name: identity_code_hash
+            type: varchar(128)
+          - name: credit_code
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: reject_reason
+            type: text
+          - name: certify_id
+            type: varchar(64)
+          - name: face_expires_at
+            type: timestamptz
+          - name: outer_order_no
+            type: varchar(64)
+          - name: certify_url
+            type: varchar(512)
+          - name: submitted_at
+            type: timestamptz
+            is_time: true
+          - name: reviewed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: wechat_accounts
+        description: 微信绑定账号
+        columns:
+          - name: id
+            type: bigserial
+          - name: user_id
+            type: varchar(64)
+          - name: union_id
+            type: varchar(64)
+          - name: open_id
+            type: varchar(64)
+          - name: nickname
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz

@@ -1,0 +1,4 @@
+version: 1
+service: usage-collection
+description: 用量采集服务——推理用量事件采集（Kafka + WAL，无持库）
+databases: []
