@@ -1,5 +1,5 @@
 // Package gateway 组装 MCP 网关（本票 = 骨架）：六只读工具注册为 stub、
-// bearer 认证、双传输（Streamable HTTP 主 / stdio 调试）。
+// bearer 认证、双传输（Streamable HTTP 主 / stdio 调试）、表级授权运行时。
 //
 // 工具面（ADR-0003）与结构化错误（gwerr）在此固定为 v1 形状；后续票只换
 // handler 内部实现（04 execute_sql、08 语义五工具），不破坏工具签名。
@@ -8,10 +8,12 @@ package gateway
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/authz"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -21,15 +23,20 @@ const (
 	implVersion = "v0.1.0"
 )
 
-// Gateway 是一个网关实例：持有运行时存储与 MCP server。
+// authzReloadInterval 是权限热重载的轮询周期（CLI grant/revoke 后最多
+// 一个周期内生效；spec §4.9 参数表无此项，进程内常量）。
+const authzReloadInterval = 5 * time.Second
+
+// Gateway 是一个网关实例：持有运行时存储、授权服务与 MCP server。
 type Gateway struct {
 	store  *store.Store
+	authz  *authz.Service
 	server *mcp.Server
 }
 
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六 stub 工具，
-// 返回可 Serve 的实例。
-func New(st *store.Store, logger *slog.Logger) *Gateway {
+// 并把表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
+func New(st *store.Store, logger *slog.Logger) (*Gateway, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
 		Version: implVersion,
@@ -39,9 +46,25 @@ func New(st *store.Store, logger *slog.Logger) *Gateway {
 		Logger: logger,
 	})
 
-	g := &Gateway{store: st, server: server}
+	g := &Gateway{store: st, server: server, authz: authz.New(st, logger)}
+	if err := g.authz.Load(context.Background()); err != nil {
+		return nil, err
+	}
 	registerTools(server)
-	return g
+	return g, nil
+}
+
+// StartAuthzReload 启动授权热重载轮询（goroutine）：CLI grant/revoke 后
+// 无需重启网关即生效（默认 5s 周期）。serve / serve-stdio 启动时调用；
+// ctx 取消即停。
+func (g *Gateway) StartAuthzReload(ctx context.Context) {
+	go g.authz.ReloadLoop(ctx, authzReloadInterval)
+}
+
+// StartAuthzReloadEvery 是 StartAuthzReload 的周期注入形态（测试 seam：
+// 端到端测试用短周期加速轮询；生产一律用默认 5s）。
+func (g *Gateway) StartAuthzReloadEvery(ctx context.Context, interval time.Duration) {
+	go g.authz.ReloadLoop(ctx, interval)
 }
 
 // Server 暴露底层 mcp.Server（测试与 stdio 形态使用）。

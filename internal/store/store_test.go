@@ -106,6 +106,82 @@ func TestCredentialsSchema(t *testing.T) {
 	}
 }
 
+// 权限表就绪：表级授权（user × FQN 扁平白名单）与版本号（热重载信号）字段形状
+// 符合 ADR-0004 / 02 票。
+func TestPermissionSchema(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	cols := map[string]bool{}
+	rows, err := s.DB().QueryContext(ctx, "PRAGMA table_info(dgw_table_grants)")
+	if err != nil {
+		t.Fatalf("table_info(dgw_table_grants): %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		cols[name] = true
+	}
+	for _, want := range []string{"user_id", "table_fqn", "granted_at"} {
+		if !cols[want] {
+			t.Errorf("授权表缺列 %q，实际 %v", want, cols)
+		}
+	}
+
+	if rev, err := s.PermissionRevision(ctx); err != nil || rev != 0 {
+		t.Errorf("初始 revision = %d, %v；want 0, nil", rev, err)
+	}
+}
+
+// revision 单行语义：多进程（CLI + 网关）共享同一计数器，只增不减。
+func TestRevisionBump(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	for want := int64(1); want <= 3; want++ {
+		if err := s.BumpPermissionRevision(ctx, nil); err != nil {
+			t.Fatalf("bump: %v", err)
+		}
+		got, err := s.PermissionRevision(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if got != want {
+			t.Errorf("bump 后 revision = %d, want %d", got, want)
+		}
+	}
+}
+
+// 重开文件：revision 持久（热重载信号跨进程存活，不因网关重启归零）。
+func TestRevisionPersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dgw.db")
+	ctx := context.Background()
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := s1.BumpPermissionRevision(ctx, nil); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	s1.Close()
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer s2.Close()
+	if rev, err := s2.PermissionRevision(ctx); err != nil || rev != 1 {
+		t.Errorf("重开后 revision = %d, %v；want 1, nil", rev, err)
+	}
+}
+
 // 单写者/多读者（ADR-0005）：一个写事务进行中，多个读者并发查询不被阻塞。
 func TestSingleWriterMultiReader(t *testing.T) {
 	s := openTemp(t)

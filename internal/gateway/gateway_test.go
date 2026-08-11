@@ -29,7 +29,11 @@ func newTestGateway(t *testing.T) (*Gateway, *store.Store) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, slog.New(slog.NewTextHandler(io.Discard, nil))), st
+	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	return g, st
 }
 
 func createKey(t *testing.T, st *store.Store, userID string) string {

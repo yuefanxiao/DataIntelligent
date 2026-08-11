@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -167,5 +168,97 @@ func TestVerifyAcrossReopen(t *testing.T) {
 
 	if userID, err := Verify(ctx, s2.DB(), plain); err != nil || userID != "dev-bob" {
 		t.Errorf("重开后 Verify = %q, %v；want dev-bob, nil", userID, err)
+	}
+}
+
+// 吊销即时生效（ADR-0004）：revoke 后同一明文立即校验失败；重复吊销幂等。
+func TestRevokeImmediateAndIdempotent(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	plain, err := Create(ctx, s.DB(), "dev-alice")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	keys, err := List(ctx, s.DB())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(keys) != 1 || keys[0].UserID != "dev-alice" || keys[0].RevokedAt != "" {
+		t.Fatalf("快照 = %+v, want 一条未吊销的 dev-alice", keys)
+	}
+
+	revoked, err := Revoke(ctx, s.DB(), keys[0].ID)
+	if err != nil || !revoked {
+		t.Fatalf("首次吊销 = %v, %v；want true, nil", revoked, err)
+	}
+	if _, err := Verify(ctx, s.DB(), plain); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("吊销后 Verify = %v, want ErrInvalidKey", err)
+	}
+
+	// 幂等：重复吊销成功但不报错（自动化脚本可安全重跑）。
+	again, err := Revoke(ctx, s.DB(), keys[0].ID)
+	if err != nil || again {
+		t.Errorf("重复吊销 = %v, %v；want false, nil", again, err)
+	}
+
+	keys, err = List(ctx, s.DB())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if keys[0].RevokedAt == "" {
+		t.Error("快照应显示吊销时间")
+	}
+}
+
+// 吊销后重开库仍失效（revoked_at 落盘，不是进程内状态）。
+func TestRevokePersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dgw.db")
+	ctx := context.Background()
+
+	s1, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	plain, err := Create(ctx, s1.DB(), "dev-bob")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	keys, err := List(ctx, s1.DB())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, err := Revoke(ctx, s1.DB(), keys[0].ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	s1.Close()
+
+	s2, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	if _, err := Verify(ctx, s2.DB(), plain); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("重开后 Verify = %v, want ErrInvalidKey", err)
+	}
+}
+
+// 快照视图不含明文：哈希可读（宿主机即访问边界），明文无处可现。
+func TestListNeverExposesPlaintext(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	plain, err := Create(ctx, s.DB(), "dev-alice")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	keys, err := List(ctx, s.DB())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, k := range keys {
+		if strings.Contains(k.UserID+fmt.Sprint(k.ID)+k.CreatedAt+k.RevokedAt, plain) {
+			t.Fatalf("快照泄露明文 %q: %+v", plain, k)
+		}
 	}
 }
