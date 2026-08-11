@@ -1,0 +1,139 @@
+package collector
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// CrossCheck 是 GORM 交叉验证（第二道闸）：迁移推导的结构（主干真相，
+// ADR-0007「migration 文件为主干」）vs GORM 模型（代码侧真相）。
+//
+// 严重度语义：
+//   - error = 模型有而迁移没有（代码查的表/列在采集结构里不存在：
+//     要么模型漂移，要么迁移语料漏采——门禁必须失败，交给人确认）；
+//   - warn  = 迁移有而模型没有（GORM 不覆盖全部表/列属正常，提示性）。
+//
+// 返回按（severity, message）排序的发现，确定性输出。
+func CrossCheck(st *Structure, models []gormModel) []Finding {
+	var findings []Finding
+
+	// 模型表索引（表名 → 合并后的模型）：两个结构共用一个 TableName
+	// 是合法形态（不同用途的查询结构），列集取并集后只比对一次。
+	modelTables := map[string]*gormModel{}
+	var modelNames []string
+	for i := range models {
+		m := &models[i]
+		agg, ok := modelTables[m.Table]
+		if !ok {
+			agg = &gormModel{Table: m.Table, Struct: m.Struct, Types: map[string]string{}}
+			modelTables[m.Table] = agg
+			modelNames = append(modelNames, m.Table)
+		} else {
+			agg.Struct += "+" + m.Struct
+		}
+		for _, c := range m.Columns {
+			if !containsStr(agg.Columns, c) {
+				agg.Columns = append(agg.Columns, c)
+			}
+			if t, ok := m.Types[c]; ok {
+				if prev, dup := agg.Types[c]; dup && prev != t {
+					// 同表多模型对同一列声明冲突类型：静默吸收会削弱
+					// 类型 warn 方向——显式提示，交人确认。
+					findings = append(findings, Finding{SourceGORM, SeverityWarn,
+						fmt.Sprintf("模型 %s 与 %s 对列 %s.%s 声明不同 gorm 类型（%s vs %s），取后者参与比对",
+							agg.Struct, m.Struct, m.Table, c, prev, t)})
+				}
+				agg.Types[c] = t
+			}
+		}
+		sort.Strings(agg.Columns)
+	}
+
+	// 迁移表索引。
+	structTables := map[string]*Table{}
+	for _, t := range st.Tables {
+		structTables[t.Name] = t
+	}
+
+	for _, name := range modelNames {
+		m := modelTables[name]
+		t, ok := structTables[name]
+		if !ok {
+			findings = append(findings, Finding{SourceGORM, SeverityError,
+				fmt.Sprintf("模型表 %s（%s）不在迁移结构里（模型漂移或迁移语料漏采）", name, m.Struct)})
+			continue
+		}
+		// 列比对。
+		structCols := map[string]*Column{}
+		for _, c := range t.Columns {
+			structCols[c.Name] = c
+		}
+		for _, col := range m.Columns {
+			sc, ok := structCols[col]
+			if !ok {
+				findings = append(findings, Finding{SourceGORM, SeverityError,
+					fmt.Sprintf("模型列 %s.%s（%s）不在迁移结构里（模型漂移或迁移漏采）", name, col, m.Struct)})
+				continue
+			}
+			if mt, ok := m.Types[col]; ok && sc.Type != "" && !typeEquivalent(sc.Type, mt) {
+				findings = append(findings, Finding{SourceGORM, SeverityWarn,
+					fmt.Sprintf("列 %s.%s 类型不一致：迁移=%s 模型=%s", name, col, sc.Type, mt)})
+			}
+		}
+		for _, c := range t.Columns {
+			if !containsStr(m.Columns, c.Name) {
+				findings = append(findings, Finding{SourceGORM, SeverityWarn,
+					fmt.Sprintf("迁移列 %s.%s 无模型映射（模型未使用该列，属正常）", name, c.Name)})
+			}
+		}
+	}
+
+	for _, t := range st.Tables {
+		if _, ok := modelTables[t.Name]; !ok {
+			findings = append(findings, Finding{SourceGORM, SeverityWarn,
+				fmt.Sprintf("迁移表 %s 无 GORM 模型覆盖（种子/纯迁移表属正常）", t.Name)})
+		}
+	}
+
+	sortFindings(findings)
+	return findings
+}
+
+// typeEquivalent 做宽松类型等价比较（去掉空白、大小写），
+// 用于迁移类型 vs 模型 gorm type 标签。
+func typeEquivalent(a, b string) bool {
+	norm := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), "")) }
+	return norm(a) == norm(b)
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// sortFindings 按（severity, message）排序——确定性输出契约。
+func sortFindings(fs []Finding) {
+	sev := map[Severity]int{SeverityError: 0, SeverityWarn: 1, SeverityInfo: 2}
+	sort.Slice(fs, func(i, j int) bool {
+		if sev[fs[i].Severity] != sev[fs[j].Severity] {
+			return sev[fs[i].Severity] < sev[fs[j].Severity]
+		}
+		return fs[i].Message < fs[j].Message
+	})
+}
+
+// countSeverity 统计某严重度数量。
+func countSeverity(fs []Finding, sev Severity) int {
+	n := 0
+	for _, f := range fs {
+		if f.Severity == sev {
+			n++
+		}
+	}
+	return n
+}

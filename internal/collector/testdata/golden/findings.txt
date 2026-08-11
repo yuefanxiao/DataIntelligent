@@ -1,0 +1,10 @@
+bss-wallet | [warn/gorm] 迁移列 vouchers.attribute_filters 无模型映射（模型未使用该列，属正常）
+bss-wallet | [warn/gorm] 迁移列 vouchers.metadata 无模型映射（模型未使用该列，属正常）
+bss-wallet | [warn/gorm] 迁移列 wallet_outbox.payload 无模型映射（模型未使用该列，属正常）
+bss-wallet | [warn/gorm] 迁移列 wallet_transactions.line_results 无模型映射（模型未使用该列，属正常）
+iam | [warn/gorm] 迁移列 api_credentials.secret_encrypted 无模型映射（模型未使用该列，属正常）
+iam | [warn/gorm] 迁移列 api_credentials.secret_sha256 无模型映射（模型未使用该列，属正常）
+iam | [warn/gorm] 迁移列 registration_code_batches.updated_at 无模型映射（模型未使用该列，属正常）
+iam | [warn/gorm] 迁移表 migration_0007_org_group_cleanup_rollback_casbin_rules 无 GORM 模型覆盖（种子/纯迁移表属正常）
+iam | [warn/gorm] 迁移表 migration_0007_org_group_cleanup_rollback_permissions 无 GORM 模型覆盖（种子/纯迁移表属正常）
+iam | [warn/gorm] 迁移表 migration_0007_org_group_cleanup_rollback_role_permissions 无 GORM 模型覆盖（种子/纯迁移表属正常）

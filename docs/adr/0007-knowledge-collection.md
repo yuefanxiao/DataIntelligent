@@ -15,6 +15,7 @@ v1 知识采集 = **混合分工**：结构知识（表/列/类型/主外键/CHE
 - **校验时机：仅编译期 vs 三层**：编译期（每次同步：FQN 唯一/引用完整性/指标 SQL 可解析/枚举合法，失败原子拒绝）+ dry-run diff（同步前展示增删改）已由 07 定；漂移报告（YAML vs 真相源对照，漏采/过期/漂移清单）是新层——「校验自动采集没采错」的闭环（人工语义会过期），只报告不自动改。→ 三层全要；drift 手动 + 每周例行。
 - **回滚：git revert + 全量重建 vs 运行时快照**：作者入口独立仓库版本化（commit/revert/review），运行时 SQLite 可从 YAML 全量重建（ADR-0005 备份=文件拷贝），墓碑传播删除——运行时快照是重复机制。→ revert + 全量重建，不引入额外机制。
 - **API 定义采集（protobuf/OpenAPI）进 v1 vs 排除**：v1 消费场景是「安全查数」，API 定义是服务拓扑延伸且各服务协议栈异构。→ v1 排除，列入 Not yet specified。
+- **文件静态解析 vs scratch-PG 回放（09 实现后补记）**：把迁移链应用到一个临时 PG 再 introspection 是「可全量重建」最忠实的读法——零生产凭证、无解析盲区（RENAME/分区/引擎语义全覆盖），代价是采集器要起 PG 且运行慢。v1 采用文件静态解析（pg_query WASM）：零依赖、确定性、golden 可直接断言；解析盲区（动态 DO 块 DDL 等）由 GORM 交叉验证 + calibrate 兜底（payment_channel 先例已被门禁实证捕获）。scratch-PG 回放列入后置评估。
 
 ## Consequences
 

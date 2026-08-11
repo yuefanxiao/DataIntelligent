@@ -1,0 +1,418 @@
+version: 1
+service: bss-wallet
+databases:
+  - name: wallet
+    tables:
+      - name: allocations
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: allocation_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: transaction_id
+            type: varchar(128)
+          - name: line_id
+            type: varchar(128)
+          - name: voucher_id
+            type: varchar(128)
+          - name: amount
+            type: numeric(30,12)
+          - name: created_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.vouchers
+            "on": allocations.voucher_id = vouchers.voucher_id
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": allocations.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": allocations.transaction_id = wallet_transactions.transaction_id
+      - name: deduction_ref_latest
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+          - name: ref_id
+            type: varchar(128)
+          - name: last_idempotency_key
+            type: varchar(128)
+          - name: request_fingerprint
+            type: varchar(128)
+          - name: transaction_id
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": deduction_ref_latest.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": deduction_ref_latest.transaction_id = wallet_transactions.transaction_id
+      - name: deduction_request_idem
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+          - name: idempotency_key
+            type: varchar(128)
+          - name: ref_id
+            type: varchar(128)
+          - name: request_fingerprint
+            type: varchar(128)
+          - name: transaction_id
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": deduction_request_idem.org_id = wallet_accounts.org_id
+          - to: bss-wallet.wallet.wallet_transactions
+            "on": deduction_request_idem.transaction_id = wallet_transactions.transaction_id
+      - name: payment_orders
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: order_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: requested_amount
+            type: numeric(30,12)
+          - name: paid_amount
+            type: numeric(30,12)
+          - name: debt_offset_amount
+            type: numeric(30,12)
+          - name: remaining_amount
+            type: numeric(30,12)
+          - name: frozen_remaining_amount
+            type: numeric(30,12)
+          - name: fee_amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: channel
+            type: smallint
+            enum_values:
+              - value: "2"
+              - value: "4"
+              - value: "5"
+          - name: channel_order_id
+            type: varchar(128)
+          - name: channel_transaction_id
+            type: varchar(128)
+          - name: code_url
+            type: text
+          - name: client_token
+            type: varchar(128)
+          - name: created_by
+            type: varchar(128)
+          - name: confirmed_by
+            type: varchar(128)
+          - name: confirm_note
+            type: text
+          - name: status
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+              - value: "4"
+              - value: "5"
+              - value: "6"
+              - value: "7"
+          - name: expires_at
+            type: timestamptz
+          - name: paid_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+              - value: team
+              - value: unspecified
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": payment_orders.org_id = wallet_accounts.org_id
+      - name: refund_orders
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: refund_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: payment_order_id
+            type: varchar(128)
+          - name: amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: status
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+              - value: "4"
+              - value: "5"
+              - value: "6"
+              - value: "7"
+          - name: reason
+            type: text
+          - name: reviewer_note
+            type: text
+          - name: reviewer_id
+            type: varchar(128)
+          - name: channel_refund_id
+            type: varchar(128)
+          - name: approved_at
+            type: timestamptz
+          - name: completed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: failure_code
+            type: varchar(64)
+          - name: failure_message
+            type: text
+          - name: retry_count
+            type: integer
+          - name: next_retry_at
+            type: timestamptz
+          - name: last_retry_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+              - value: team
+              - value: unspecified
+          - name: actor_id
+            type: VARCHAR(64)
+          - name: actor_type
+            type: VARCHAR(32)
+          - name: refund_channel
+            type: smallint
+        references:
+          - to: bss-wallet.wallet.payment_orders
+            "on": refund_orders.payment_order_id = payment_orders.order_id
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": refund_orders.org_id = wallet_accounts.org_id
+      - name: vouchers
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: voucher_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: name
+            type: varchar(128)
+          - name: total_amount
+            type: numeric(30,12)
+          - name: remaining_amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: priority
+            type: smallint
+          - name: attribute_filters
+            type: jsonb
+          - name: source
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+          - name: status
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+          - name: effective_at
+            type: timestamptz
+          - name: expires_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: idempotency_key
+            type: varchar(255)
+          - name: request_fingerprint
+            type: varchar(64)
+          - name: metadata
+            type: jsonb
+          - name: used_at
+            type: timestamptz
+          - name: expired_at
+            type: timestamptz
+          - name: revoked_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": vouchers.org_id = wallet_accounts.org_id
+      - name: wallet_accounts
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(36)
+          - name: balance
+            type: numeric(30,12)
+          - name: frozen_amount
+            type: numeric(30,12)
+          - name: debt_limit
+            type: numeric(30,12)
+          - name: cumulative_recharge_amount
+            type: numeric(30,12)
+          - name: cumulative_deduction_amount
+            type: numeric(30,12)
+          - name: cumulative_refund_amount
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: status
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+          - name: alert_level
+            type: smallint
+            enum_values:
+              - value: "0"
+              - value: "1"
+              - value: "2"
+              - value: "3"
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: org_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+              - value: team
+              - value: unspecified
+      - name: wallet_outbox
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: event_id
+            type: varchar(128)
+          - name: topic
+            type: varchar(128)
+          - name: partition_key
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: event_type
+            type: varchar(64)
+          - name: payload
+            type: jsonb
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: dead
+              - value: pending
+              - value: processing
+              - value: published
+          - name: attempt_count
+            type: integer
+          - name: retry_count
+            type: integer
+          - name: available_at
+            type: timestamptz
+          - name: claimed_at
+            type: timestamptz
+          - name: claimed_by
+            type: varchar(128)
+          - name: claim_token
+            type: varchar(64)
+          - name: lease_expires_at
+            type: timestamptz
+          - name: published_at
+            type: timestamptz
+          - name: last_error
+            type: text
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": wallet_outbox.org_id = wallet_accounts.org_id
+      - name: wallet_transactions
+        schema: wallet
+        columns:
+          - name: id
+            type: bigint
+          - name: transaction_id
+            type: varchar(128)
+          - name: org_id
+            type: varchar(36)
+          - name: tx_type
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+              - value: "4"
+              - value: "5"
+              - value: "6"
+              - value: "7"
+          - name: amount
+            type: numeric(30,12)
+          - name: voucher_deducted
+            type: numeric(30,12)
+          - name: balance_deducted
+            type: numeric(30,12)
+          - name: balance_before
+            type: numeric(30,12)
+          - name: balance_after
+            type: numeric(30,12)
+          - name: currency
+            type: char(3)
+          - name: reference_type
+            type: varchar(32)
+          - name: reference_id
+            type: varchar(128)
+          - name: ref_id
+            type: varchar(128)
+          - name: actor_id
+            type: varchar(128)
+          - name: description
+            type: text
+          - name: idempotency_key
+            type: varchar(128)
+          - name: line_results
+            type: jsonb
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-wallet.wallet.wallet_accounts
+            "on": wallet_transactions.org_id = wallet_accounts.org_id
