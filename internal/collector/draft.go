@@ -2,6 +2,7 @@ package collector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +15,10 @@ import (
 
 // draftFile 是采集产出的服务 YAML 草稿结构（与 07 同步管线作者入口
 // services/<service>.yaml 同构——semantic.Load + Compile 直接兼容）。
-// 语义字段（description/is_time/enum label）留空：语义知识人工
-// （ADR-0007「结构自动、语义人工」），草稿只承载结构。
+// 结构字段（库/表/列/枚举值/引用边）由采集器机械产出；语义字段
+// （description/is_time/enum label）采集器不产出——由人工/Agent 回写，
+// 采集重跑时经 MergeSemantics 按 FQN 保留（ADR-0007「结构自动、
+// 语义人工」，结构永远以新采集为准）。
 type draftFile struct {
 	Version     int       `yaml:"version"`
 	Service     string    `yaml:"service"`
@@ -41,6 +44,7 @@ type draftColumn struct {
 	Name        string      `yaml:"name"`
 	Type        string      `yaml:"type"`
 	Description string      `yaml:"description,omitempty"`
+	IsTime      bool        `yaml:"is_time,omitempty"`
 	EnumValues  []draftEnum `yaml:"enum_values,omitempty"`
 }
 
@@ -96,10 +100,11 @@ func RenderDraft(st *Structure) ([]byte, error) {
 		}
 		db.Tables = append(db.Tables, dt)
 	}
-	f := draftFile{
-		Version:   yamlVersion,
-		Service:   st.Service,
-		Databases: []draftDB{db},
+	f := draftFile{Version: yamlVersion, Service: st.Service}
+	if st.DB != "" {
+		// 无持库服务（清单未配置 db）不产出 database 条目——服务实体
+		// 草稿没有库层，编译为「服务 →（无子实体）」。
+		f.Databases = []draftDB{db}
 	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -113,8 +118,106 @@ func RenderDraft(st *Structure) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// MergeSemantics 把现有作者入口文件里已确认的语义（服务/库/表/列的
+// description、列 is_time、枚举 label）按 FQN 保留到新草稿——采集重跑
+// 只更新结构，不覆盖人工语义（ADR-0007「结构自动、语义人工」：
+// 语义回写后不会因增量采集丢失，纯结构变更批量确认 US-16 负担≈零）。
+// 合并只读语义字段：结构（表/列/枚举值/引用）永远以新采集为准，
+// 已删除的表/列/枚举值的语义自然随结构丢弃。
+//
+// 确定性：同输入同输出（输出经统一渲染，与 RenderDraft 同序）。
+func MergeSemantics(newDraft, existing []byte) ([]byte, error) {
+	var cur draftFile
+	if err := yaml.Unmarshal(newDraft, &cur); err != nil {
+		return nil, fmt.Errorf("解析新草稿: %w", err)
+	}
+	var prev draftFile
+	if err := yaml.Unmarshal(existing, &prev); err != nil {
+		return nil, fmt.Errorf("合并语义失败（现有作者入口 %s 解析失败，拒绝覆盖以免丢失语义）: %w", cur.Service, err)
+	}
+	if prev.Service != "" && prev.Service != cur.Service {
+		return nil, fmt.Errorf("合并语义失败（现有作者入口服务名 %q ≠ 草稿 %q，拒绝覆盖）", prev.Service, cur.Service)
+	}
+	cur.Description = prev.Description
+	for i := range cur.Databases {
+		pdb := findDraftDB(prev, cur.Databases[i].Name)
+		if pdb == nil {
+			continue
+		}
+		cur.Databases[i].Description = pdb.Description
+		for j := range cur.Databases[i].Tables {
+			pt := findDraftTable(pdb, cur.Databases[i].Tables[j].Name)
+			if pt == nil {
+				continue
+			}
+			cur.Databases[i].Tables[j].Description = pt.Description
+			for k := range cur.Databases[i].Tables[j].Columns {
+				pc := findDraftColumn(pt, cur.Databases[i].Tables[j].Columns[k].Name)
+				if pc == nil {
+					continue
+				}
+				col := &cur.Databases[i].Tables[j].Columns[k]
+				col.Description = pc.Description
+				col.IsTime = pc.IsTime
+				for m := range col.EnumValues {
+					if pe := findDraftEnum(pc, col.EnumValues[m].Value); pe != nil {
+						col.EnumValues[m].Label = pe.Label
+					}
+				}
+			}
+		}
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cur); err != nil {
+		return nil, fmt.Errorf("渲染合并草稿 %s: %w", cur.Service, err)
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func findDraftDB(f draftFile, name string) *draftDB {
+	for i := range f.Databases {
+		if f.Databases[i].Name == name {
+			return &f.Databases[i]
+		}
+	}
+	return nil
+}
+
+func findDraftTable(db *draftDB, name string) *draftTable {
+	for i := range db.Tables {
+		if db.Tables[i].Name == name {
+			return &db.Tables[i]
+		}
+	}
+	return nil
+}
+
+func findDraftColumn(t *draftTable, name string) *draftColumn {
+	for i := range t.Columns {
+		if t.Columns[i].Name == name {
+			return &t.Columns[i]
+		}
+	}
+	return nil
+}
+
+func findDraftEnum(c *draftColumn, value string) *draftEnum {
+	for i := range c.EnumValues {
+		if c.EnumValues[i].Value == value {
+			return &c.EnumValues[i]
+		}
+	}
+	return nil
+}
+
 // WriteDraft 把草稿写到 outDir/services/<service>.yaml（覆盖写，
-// 采集 = 全量重建语义，幂等）。
+// 采集 = 全量重建结构，幂等）。已有文件时先 MergeSemantics 保留
+// 人工语义——重跑采集不丢描述/is_time/枚举 label。
 func WriteDraft(outDir string, st *Structure) (string, error) {
 	data, err := RenderDraft(st)
 	if err != nil {
@@ -125,6 +228,13 @@ func WriteDraft(outDir string, st *Structure) (string, error) {
 		return "", fmt.Errorf("创建草稿目录 %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, st.Service+".yaml")
+	if existing, err := os.ReadFile(path); err == nil {
+		if data, err = MergeSemantics(data, existing); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("读取现有草稿 %s: %w", path, err)
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", fmt.Errorf("写草稿 %s: %w", path, err)
 	}

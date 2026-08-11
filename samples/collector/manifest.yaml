@@ -4,6 +4,9 @@
 # iam_audit / bss_invoice…，不能从仓库结构可靠推断），清单是采集器
 # 的确定性输入，走 git review（库名变更 = 清单变更）。
 #
+# 覆盖 neo-cloud 全部 13 个后端服务；无持库服务（纯编排/聚合/事件采集，
+# 清单不配 db）仍产出服务实体草稿，保证语义层覆盖全部服务。
+#
 # 用样例采集：
 #   dgw-collect scan --repo ~/cloud/neo-cloud --manifest samples/collector/manifest.yaml --out /tmp/collect-out
 version: 1
@@ -41,3 +44,10 @@ services:
   - name: ops-ticket
     dir: ops/ops-ticket-service
     db: ops_ticket
+  # 无持库服务（不配 db）：仅产出服务实体草稿
+  - name: ops-operation
+    dir: ops/ops-operation-service
+  - name: dashboard-backend
+    dir: dashboard/dashboard-backend
+  - name: usage-collection
+    dir: inference/usage-collection-service

@@ -25,8 +25,10 @@ type ManifestService struct {
 	Name string `yaml:"name"`
 	// Dir 是服务目录（相对 repo root）。
 	Dir string `yaml:"dir"`
-	// DB 是生产库名（每服务一库，FQN 第二段）。
-	DB string `yaml:"db"`
+	// DB 是生产库名（每服务一库，FQN 第二段）；空 = 服务无持库
+	// （纯编排/聚合/事件采集类服务：仍产出服务实体草稿，无表结构，
+	// 保证语义层覆盖全部后端服务）。
+	DB string `yaml:"db,omitempty"`
 	// ModelsDir 是 GORM 模型目录（相对服务目录，缺省 internal/data）。
 	ModelsDir string `yaml:"models_dir,omitempty"`
 }
@@ -49,15 +51,15 @@ func LoadManifest(path string) (*Manifest, error) {
 	seen := map[string]bool{}
 	for i := range m.Services {
 		s := &m.Services[i]
-		if s.Name == "" || s.Dir == "" || s.DB == "" {
-			return nil, fmt.Errorf("采集清单 %s: 第 %d 个服务缺 name/dir/db 字段", path, i+1)
+		if s.Name == "" || s.Dir == "" {
+			return nil, fmt.Errorf("采集清单 %s: 第 %d 个服务缺 name/dir 字段", path, i+1)
 		}
 		// 服务名/库名是 FQN 段与草稿文件名：只允许标识符形态
 		// （防路径穿越——name 直接拼进 services/<name>.yaml）。
 		if !identRe.MatchString(s.Name) {
 			return nil, fmt.Errorf("采集清单 %s: 服务名 %q 非法（只允许小写字母/数字/连字符/下划线，且不以连字符开头）", path, s.Name)
 		}
-		if !identRe.MatchString(s.DB) {
+		if s.DB != "" && !identRe.MatchString(s.DB) {
 			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的库名 %q 非法（只允许小写字母/数字/连字符/下划线，且不以连字符开头）", path, s.Name, s.DB)
 		}
 		// dir/models_dir 是相对 repo root/服务目录的路径：

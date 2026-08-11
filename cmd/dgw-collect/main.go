@@ -120,8 +120,12 @@ func cmdScan() int {
 
 	gateErrors := 0
 	for _, sr := range res.Services {
+		db := sr.DB
+		if db == "" {
+			db = "-（无持库）"
+		}
 		fmt.Printf("dgw: 采集 %s（库 %s%s）：%d 表 / %d 列 / %d 枚举 / %d 引用\n",
-			sr.Name, sr.DB, schemaSuffix(sr.Schema), sr.Tables, sr.Columns, sr.Enums, sr.Refs)
+			sr.Name, db, schemaSuffix(sr.Schema), sr.Tables, sr.Columns, sr.Enums, sr.Refs)
 		n := sr.PrintFindings()
 		gateErrors += n
 	}
@@ -166,6 +170,10 @@ func cmdCalibrate() int {
 	ms, err := m.Find(*service)
 	if err != nil {
 		log.Fatalf("%v", err)
+	}
+	if ms.DB == "" {
+		log.Printf("服务 %s 无持库（清单未配置 db）：没有可校准的表结构，跳过校准", ms.Name)
+		return 0
 	}
 	st, findings, err := collector.ParseServiceMigrations(ms, *repo)
 	if err != nil {
