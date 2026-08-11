@@ -32,11 +32,12 @@ Status: open
 - [07 语义层存储与检索决策](https://github.com/yuefanxiao/DataIntelligent/issues/8) — 存储=同机房独立 PG 实例（同步管线零生产凭证）+ 按服务拆 YAML 作者入口 + 自研 Go 同步管线（幂等 upsert + 墓碑 + dry-run diff）；运行时只查 PG 不查 YAML；检索=五条数据层原语（FQN 精确/双入口关键词/类型化边遍历/指标公式/枚举值，工具协议留 02），search_entities 走 RRF 混合（pg_trgm 关键词主通道 + pgvector 向量兜底，不设固定比例）；v1 引入向量，embedding=外部 OpenAI text-embedding-3（接受元数据出机房）；不引入图数据库。输出 08/02/10/11。
 
 - [02 Gateway v1 工具面：暴露哪些 MCP 工具](https://github.com/yuefanxiao/DataIntelligent/issues/3) — v1 工具面 = 六只读工具 + 一轻量 Agent Skill，细粒度一一对应、原语直译命名（search_entities 双入口 RRF / get_entity FQN 精确 / traverse_relations 边遍历 / get_metric_definition 公式+dry-run 展开 / list_enum_values / execute_sql 只读）；有界返回（语义列表 ≤20+total、SQL 默认 500/硬上限 5000 + truncated）；execute_sql 留可选 plan_id 溯源口子；v1 不做 create_query_plan（方案乙草案入 docs/research/02-query-planning-design.md 作 10 输入）；结果编码 JSON、限额数值归 12。输出 03/04/10/12；解封 03/04/12。
+- [03 权限模型：粒度、API key 机制与维护方](https://github.com/yuefanxiao/DataIntelligent/issues/4) — 双表面授权：execute_sql 默认拒绝（表级 FQN 白名单；指标/概念授权编译期展开为表授权；不可解析/未知表一律拒绝），语义元数据面认证即读；key→用户扁平 grants（opaque 随机串哈希存储、一用户多 key、吊销即时、v1 不设过期）；grants YAML + CLI 维护（编译进语义存储 PG 权限表、热重载）；服务/库级通配=作者入口语法糖、展开=快照（新表默认拒绝+管线告警+重展开确认，`*` 不开放）；PG 侧一个共享只读角色只保「物理不能写」（timeout/禁 SET ROLE），细粒度全在网关侧；v1 无管理员角色；列级/行级/掩码后置优化、管理工作台 v2。解封 12；输出 04（key→用户聚合）、10（解析器复用）、08（新表告警流程）。
 
 ## Not yet specified
 
-- 管理工作台/控制台形态（权限与 API key 的更新界面）——权限模型票据解决后可能浮出
-- API key 的生成 / 分发 / 轮换机制细节
+- 权限后续优化：列级权限（拒绝/掩码）、行级 RLS、key 过期策略（03 决议后置，12 排期时定）
+- 管理工作台/控制台形态（权限与 API key 的更新界面 + 管理员口令）——03 已定 v2 候选，v1 用 grants YAML + CLI
 - 复制延迟容忍度与数据新鲜度约定
 - Schema 维护方式（ORM + migration？）——知识采集票据前需确认
 - 网关自身的高可用 / 监控 / 告警需求
