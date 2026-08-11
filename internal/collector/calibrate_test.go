@@ -126,17 +126,17 @@ func TestDraftTypeToInfoSchema(t *testing.T) {
 // TestNormalizeInfoSchemaType 归一化往返等价。
 func TestNormalizeInfoSchemaType(t *testing.T) {
 	len128 := 128
-	if got := normalizeInfoSchemaType("character varying", &len128, nil, nil, nil); got != "character varying(128)" {
+	if got := normalizeInfoSchemaType("character varying", &len128, nil, nil); got != "character varying(128)" {
 		t.Errorf("varchar 带长度归一 = %q", got)
 	}
 	prec, scale := 30, 12
-	if got := normalizeInfoSchemaType("numeric", nil, &prec, &scale, nil); got != "numeric(30,12)" {
+	if got := normalizeInfoSchemaType("numeric", nil, &prec, &scale); got != "numeric(30,12)" {
 		t.Errorf("numeric 带精度归一 = %q", got)
 	}
-	if got := normalizeInfoSchemaType("bigint", nil, nil, nil, nil); got != "bigint" {
+	if got := normalizeInfoSchemaType("bigint", nil, nil, nil); got != "bigint" {
 		t.Errorf("bigint 归一 = %q", got)
 	}
-	if got := normalizeInfoSchemaType("timestamp with time zone", nil, nil, nil, nil); !strings.Contains(got, "timestamp") {
+	if got := normalizeInfoSchemaType("timestamp with time zone", nil, nil, nil); !strings.Contains(got, "timestamp") {
 		t.Errorf("timestamptz 归一 = %q", got)
 	}
 }

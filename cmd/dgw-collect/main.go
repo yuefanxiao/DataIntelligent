@@ -147,11 +147,10 @@ func cmdCalibrate() int {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	files, err := collector.DiscoverMigrations(ms.ServiceDir(*repo))
+	st, findings, err := collector.ParseServiceMigrations(ms, *repo)
 	if err != nil {
-		log.Fatalf("服务 %s: %v", ms.Name, err)
+		log.Fatalf("%v", err)
 	}
-	st, findings := collector.ParseMigrations(ms.Name, ms.DB, files)
 	for _, f := range findings {
 		fmt.Printf("  %s\n", f.String())
 	}
@@ -171,9 +170,9 @@ func cmdCalibrate() int {
 	warns := 0
 	for _, f := range calFindings {
 		switch f.Severity {
-		case "error":
+		case collector.SeverityError:
 			errs++
-		case "warn":
+		case collector.SeverityWarn:
 			warns++
 		}
 	}

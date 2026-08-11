@@ -12,8 +12,9 @@ import (
 	wasm "github.com/wasilibs/go-pgquery"
 )
 
-// migrationFile 是 golang-migrate 命名约定（NNNN_YYYYMMDDHHMMSS_name.up.sql），
-// 文件名即版本序。目录名统一、纯 SQL up/down、可全量重建（ADR-0007）。
+// migrationsDirName 是迁移目录名。语料事实（ADR-0007）：golang-migrate
+// v4.19.1 命名约定（NNNN_YYYYMMDDHHMMSS_name.up.sql），文件名即版本序；
+// 目录名统一、纯 SQL up/down、可全量重建。
 const migrationsDirName = "migrations"
 
 // DiscoverMigrations 找服务的迁移文件（migrations/ 顶层 *.up.sql，
@@ -49,12 +50,12 @@ func ParseMigrations(service, db string, files []string) (*Structure, []Finding)
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
-			findings = append(findings, Finding{"migration", "error", fmt.Sprintf("读取 %s: %v", f, err)})
+			findings = append(findings, Finding{SourceMigration, SeverityError, fmt.Sprintf("读取 %s: %v", f, err)})
 			continue
 		}
 		tree, err := wasm.Parse(string(data))
 		if err != nil {
-			findings = append(findings, Finding{"migration", "error",
+			findings = append(findings, Finding{SourceMigration, SeverityError,
 				fmt.Sprintf("解析 %s 失败（PG 语法错误 = 迁移文件本身不可解析，采集停在此文件）: %v", f, err)})
 			continue
 		}
@@ -113,37 +114,68 @@ func applyCreateTable(st *Structure, cs *pg_query.CreateStmt, src string, beg, e
 				Name: e.ColumnDef.Colname,
 				Type: columnType(src, beg, end, e.ColumnDef),
 			}
-			// 列级内联约束（NOT NULL/UNIQUE 等不进模型；列级外键/枚举
-			// 在 corpus 里走表级命名约束，此处登记防御）。
+			// 列级内联约束（NOT NULL/UNIQUE 等不进模型；列级外键
+			// REFERENCES 与 CHECK IN 匿名形态也采集——iam 全部外键
+			// 是内联匿名写法，跳过会静默漏采）。
 			for _, c := range e.ColumnDef.Constraints {
-				if cn := c.GetConstraint(); cn != nil && cn.Conname != "" {
-					applyConstraint(t, cn, findings)
-				}
+				applyColumnConstraint(t, col.Name, c, findings)
 			}
 			t.Columns = append(t.Columns, col)
 		case *pg_query.Node_Constraint:
 			applyConstraint(t, e.Constraint, findings)
 		}
 	}
-	// 重建语义：同表名 CREATE（IF NOT EXISTS 等）以最后定义为准。
-	for i, prev := range st.Tables {
-		if prev.Name == t.Name {
-			st.Tables[i] = t
+	// 重建语义：PG 回放里 CREATE TABLE 重建同名表 = 覆盖此前定义；
+	// IF NOT EXISTS 且表已存在 = no-op（保留既有结构与它的 ALTER 效果）。
+	if prev := st.findTable(t.Name); prev != nil {
+		if cs.IfNotExists {
 			return
+		}
+		for i := range st.Tables {
+			if st.Tables[i].Name == t.Name {
+				st.Tables[i] = t
+				return
+			}
 		}
 	}
 	st.Tables = append(st.Tables, t)
 }
 
-// applyConstraint 登记一个约束（命名约束；匿名约束不登记——
-// 匿名 CHECK 无法被 DROP CONSTRAINT 点名，只做一次性枚举提取）。
-func applyConstraint(t *Table, cn *pg_query.Constraint, findings *[]Finding) {
-	if cn.Conname == "" {
-		if st, ok := enumState(t, cn); ok {
-			attachEnum(t, st, findings)
-		}
+// applyColumnConstraint 处理列级内联约束（匿名形态）：匿名 CHECK 枚举
+// 一次性提取（无约束名，无法被 DROP CONSTRAINT 点名，不登记）；
+// 匿名外键 REFERENCES 采集引用边（iam 全库外键是内联匿名写法——
+// 内联形态的 FkAttrs 为空，外键列就是所在列，用 columnName 补上）。
+func applyColumnConstraint(t *Table, columnName string, cn *pg_query.Node, findings *[]Finding) {
+	c := cn.GetConstraint()
+	if c == nil {
 		return
 	}
+	if c.Conname != "" {
+		applyConstraint(t, c, findings)
+		return
+	}
+	switch c.Contype {
+	case pg_query.ConstrType_CONSTR_CHECK:
+		if st, ok := enumState(t, c); ok {
+			attachEnum(t, st, findings)
+		}
+	case pg_query.ConstrType_CONSTR_FOREIGN:
+		cols := stringList(c.FkAttrs)
+		if len(cols) == 0 {
+			cols = []string{columnName}
+		}
+		t.References = append(t.References, &Reference{
+			TargetSchema: fkSchema(c.Pktable),
+			TargetTable:  c.Pktable.Relname,
+			Cols:         cols,
+			PkCols:       stringList(c.PkAttrs),
+		})
+	}
+}
+
+// applyConstraint 登记一个命名约束（可被 DROP CONSTRAINT 点名撤销，
+// 枚举/外键效果进约束登记表）。
+func applyConstraint(t *Table, cn *pg_query.Constraint, findings *[]Finding) {
 	switch cn.Contype {
 	case pg_query.ConstrType_CONSTR_CHECK:
 		st, ok := enumState(t, cn)
@@ -188,7 +220,7 @@ func enumState(t *Table, cn *pg_query.Constraint) (constraintState, bool) {
 
 // enumExpr 走 CHECK 表达式树；返回（列名, 值列表, 是否可提取）。
 func enumExpr(t *Table, n *pg_query.Node) (string, []string, bool) {
-	a := nodeAExpr(n)
+	a := n.GetAExpr()
 	if a == nil || a.Kind != pg_query.A_Expr_Kind_AEXPR_IN {
 		return "", nil, false
 	}
@@ -256,7 +288,7 @@ func attachEnum(t *Table, st constraintState, findings *[]Finding) {
 	seen := map[string]bool{}
 	for _, v := range st.values {
 		if v == "" {
-			*findings = append(*findings, Finding{"migration", "warn",
+			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 				fmt.Sprintf("列 %s.%s 的枚举含空字符串值（'' 表示未指定），07 编译校验要求枚举非空，已跳过该值", t.Name, c.Name)})
 			continue
 		}
@@ -273,7 +305,7 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 	if t == nil {
 		// ALTER 目标表不存在 = 迁移序列与结构推断不一致（可能是跨
 		// 库 schema 前缀错配或语料残缺）——警告但不中断。
-		*findings = append(*findings, Finding{"migration", "warn",
+		*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 			fmt.Sprintf("%s: ALTER TABLE %s 目标表不在采集结构里（跳过该语句）", file, at.Relation.Relname)})
 		return
 	}
@@ -283,15 +315,13 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 		case pg_query.AlterTableType_AT_AddColumn:
 			if cd := c.Def.GetColumnDef(); cd != nil {
 				col := &Column{Name: cd.Colname, Type: columnType(src, beg, end, cd)}
-				for _, cn := range cd.Constraints {
-					if con := cn.GetConstraint(); con != nil && con.Conname != "" {
-						applyConstraint(t, con, findings)
-					}
+				for _, c := range cd.Constraints {
+					applyColumnConstraint(t, col.Name, c, findings)
 				}
 				if t.findColumn(col.Name) != nil {
 					// ADD COLUMN 同名列已存在（IF NOT EXISTS 语义）——
 					// 保留原列（不覆盖类型，追加语义正确）。
-					*findings = append(*findings, Finding{"migration", "warn",
+					*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 						fmt.Sprintf("%s: ADD COLUMN %s.%s 重复（已存在，跳过）", file, t.Name, col.Name)})
 					continue
 				}
@@ -304,11 +334,11 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 				if col := t.findColumn(c.Name); col != nil {
 					col.Type = columnType(src, beg, end, cd)
 				} else {
-					*findings = append(*findings, Finding{"migration", "warn",
+					*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 						fmt.Sprintf("%s: ALTER COLUMN %s.%s 目标列不在结构里（跳过）", file, t.Name, c.Name)})
 				}
 			} else {
-				*findings = append(*findings, Finding{"migration", "warn",
+				*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 					fmt.Sprintf("%s: ALTER COLUMN %s.%s TYPE 无类型信息（跳过）", file, t.Name, c.Name)})
 			}
 		case pg_query.AlterTableType_AT_AddConstraint:
@@ -344,6 +374,10 @@ func columnType(src string, beg, end int, cd *pg_query.ColumnDef) string {
 		i++
 	}
 	begType := i
+	endType := i
+	// 类型 = 标识符序列（schema. 限定 / 多词内建类型）+ 可选 (typmods)
+	// 交替（timestamp(3) with time zone 是「标识符+括号+标识符」），
+	// 在 SQL 关键字前停下。
 	for i < end {
 		// 跳过空白；若下一个字符不是标识符起始，停止。
 		j := i
@@ -353,7 +387,7 @@ func columnType(src string, beg, end int, cd *pg_query.ColumnDef) string {
 		if j >= end || !isIdentStart(src[j]) {
 			break
 		}
-		// 收集一个标识符。
+		// 收集一个标识符（关键字是类型的终止边界）。
 		k := j
 		for k < end && isIdentChar(src[k]) {
 			k++
@@ -362,38 +396,38 @@ func columnType(src string, beg, end int, cd *pg_query.ColumnDef) string {
 			break
 		}
 		i = k
-		// 标识符后：空白/点 → 继续（多词内建类型 / schema 限定）；
-		// '(' → typmods 开始，标识符序列结束。
+		// 标识符后：空白/点 → 继续；'(' → typmods 平衡括号后继续。
 		k2 := i
 		for k2 < end && isSpace(src[k2]) {
 			k2++
 		}
-		if k2 >= end || src[k2] == '(' {
+		if k2 >= end {
 			break
+		}
+		if src[k2] == '(' {
+			depth := 0
+			for ; k2 < end; k2++ {
+				if src[k2] == '(' {
+					depth++
+				} else if src[k2] == ')' {
+					depth--
+					if depth == 0 {
+						k2++
+						break
+					}
+				}
+			}
+			i = k2
+			continue
 		}
 		if src[k2] == '.' {
 			i = k2 + 1
 			continue
 		}
 		i = k2
-	}
-	endType := i
-	// 可选 typmods：(…) 平衡括号。
-	if i < end && src[i] == '(' {
-		depth := 0
-		for ; i < end; i++ {
-			if src[i] == '(' {
-				depth++
-			} else if src[i] == ')' {
-				depth--
-				if depth == 0 {
-					i++
-					break
-				}
-			}
-		}
 		endType = i
 	}
+	endType = i
 	// 可选数组后缀 []。
 	j := endType
 	for j < end && isSpace(src[j]) {
@@ -458,7 +492,7 @@ func fallbackType(tn *pg_query.TypeName) string {
 var typeStopWords = map[string]bool{
 	"not": true, "null": true, "default": true, "constraint": true,
 	"primary": true, "unique": true, "check": true, "references": true,
-	"collate": true, "generated": true, "exclude": true,
+	"collate": true, "generated": true, "exclude": true, "using": true,
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
@@ -513,16 +547,6 @@ func fkSchema(rv *pg_query.RangeVar) string {
 		return ""
 	}
 	return rv.Schemaname
-}
-
-func nodeAExpr(n *pg_query.Node) *pg_query.A_Expr {
-	if n == nil {
-		return nil
-	}
-	if a := n.GetAExpr(); a != nil {
-		return a
-	}
-	return nil
 }
 
 // unwrapList 解包一层 Node_List 包装（DROP TABLE 的对象是

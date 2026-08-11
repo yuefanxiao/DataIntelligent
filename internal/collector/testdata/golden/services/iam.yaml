@@ -85,6 +85,9 @@ databases:
             type: timestamptz
           - name: updated_at
             type: timestamptz
+        references:
+          - to: iam.iam.users
+            "on": invite_codes.user_id = users.user_id
       - name: invite_configs
         columns:
           - name: id
@@ -178,6 +181,15 @@ databases:
             type: timestamptz
           - name: updated_at
             type: timestamptz
+        references:
+          - to: iam.iam.organizations
+            "on": org_invite_links.org_id = organizations.organization_id
+          - to: iam.iam.users
+            "on": org_invite_links.created_by_user_id = users.user_id
+          - to: iam.iam.users
+            "on": org_invite_links.refreshed_by_user_id = users.user_id
+          - to: iam.iam.users
+            "on": org_invite_links.revoked_by_user_id = users.user_id
       - name: org_join_applications
         columns:
           - name: id
@@ -214,6 +226,15 @@ databases:
             type: timestamptz
           - name: updated_at
             type: timestamptz
+        references:
+          - to: iam.iam.org_invite_links
+            "on": org_join_applications.org_invite_link_id = org_invite_links.org_invite_link_id
+          - to: iam.iam.organizations
+            "on": org_join_applications.org_id = organizations.organization_id
+          - to: iam.iam.users
+            "on": org_join_applications.reviewed_by = users.user_id
+          - to: iam.iam.users
+            "on": org_join_applications.user_id = users.user_id
       - name: organization_invitations
         columns:
           - name: id
@@ -349,6 +370,11 @@ databases:
             type: timestamptz
           - name: updated_at
             type: timestamptz
+        references:
+          - to: iam.iam.users
+            "on": personal_invite_relations.invitee_user_id = users.user_id
+          - to: iam.iam.users
+            "on": personal_invite_relations.inviter_user_id = users.user_id
       - name: registration_code_batches
         columns:
           - name: id

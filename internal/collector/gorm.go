@@ -17,7 +17,6 @@ import (
 type gormModel struct {
 	Table   string
 	Struct  string
-	Schema  string // TableName() 带 schema 前缀时记录（bill.bills → bill）
 	Columns []string
 	Types   map[string]string // 列 → gorm tag 显式 type（无则缺省，不做类型比较）
 }
@@ -36,14 +35,21 @@ type gormModel struct {
 func ExtractGormModels(dir string) ([]gormModel, []Finding) {
 	var findings []Finding
 	if _, err := os.Stat(dir); err != nil {
-		return nil, []Finding{{"gorm", "error", fmt.Sprintf("读取模型目录 %s: %v", dir, err)}}
+		return nil, []Finding{{SourceGORM, SeverityError, fmt.Sprintf("读取模型目录 %s: %v", dir, err)}}
 	}
 	files := map[string]*ast.File{}
 	collectGoFiles(dir, files, &findings)
-	// 第一遍：登记全部结构（含嵌入解析的候选）。
+	// 第一遍：登记全部结构（含嵌入解析的候选）。文件按路径排序
+	// 遍历——map 无序，解析失败的发现顺序必须确定性。
+	paths := make([]string, 0, len(files))
+	for p := range files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
 	structs := map[string]*ast.StructType{}
 	tables := map[string]string{} // 结构名 → TableName()
-	for _, f := range files {
+	for _, p := range paths {
+		f := files[p]
 		for _, decl := range f.Decls {
 			gd, ok := decl.(*ast.GenDecl)
 			if !ok || gd.Tok != token.TYPE {
@@ -79,8 +85,8 @@ func ExtractGormModels(dir string) ([]gormModel, []Finding) {
 	sort.Strings(names)
 	var models []gormModel
 	for _, name := range names {
-		table, schema := splitQualified(tables[name])
-		m := gormModel{Table: table, Struct: name, Schema: schema, Types: map[string]string{}}
+		table := splitQualified(tables[name])
+		m := gormModel{Table: table, Struct: name, Types: map[string]string{}}
 		cols := collectColumns(name, structs, map[string]bool{}, &findings)
 		for col, typ := range cols {
 			m.Columns = append(m.Columns, col)
@@ -94,12 +100,13 @@ func ExtractGormModels(dir string) ([]gormModel, []Finding) {
 	return models, findings
 }
 
-// splitQualified 拆 TableName() 的 schema 限定（bill.bills → bills, bill）。
-func splitQualified(table string) (string, string) {
+// splitQualified 拆 TableName() 的 schema 限定（bill.bills → bills；
+// 与迁移结构比对用表名，schema 前缀只做归一不做比对）。
+func splitQualified(table string) string {
 	if i := strings.LastIndex(table, "."); i >= 0 {
-		return table[i+1:], table[:i]
+		return table[i+1:]
 	}
-	return table, ""
+	return table
 }
 
 // collectColumns 展开一个结构的列（含嵌入递归）。返回 列名→显式类型。
@@ -302,7 +309,7 @@ func collectGoFiles(dir string, files map[string]*ast.File, findings *[]Finding)
 		fset := token.NewFileSet()
 		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if perr != nil {
-			*findings = append(*findings, Finding{"gorm", "warn",
+			*findings = append(*findings, Finding{SourceGORM, SeverityWarn,
 				fmt.Sprintf("解析 %s 失败（跳过该文件）: %v", path, perr)})
 			continue
 		}

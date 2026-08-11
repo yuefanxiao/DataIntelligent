@@ -201,10 +201,28 @@ func attachEnumValues(c *Column, values []string) {
 	sort.Strings(c.EnumValues)
 }
 
+// Severity 是发现级别（error = 门禁失败 / warn = 提示 / info = 信息）。
+type Severity string
+
+const (
+	SeverityError Severity = "error"
+	SeverityWarn  Severity = "warn"
+	SeverityInfo  Severity = "info"
+)
+
+// Source 是发现来源（迁移解析 / GORM 交叉验证 / 生产校准）。
+type Source string
+
+const (
+	SourceMigration Source = "migration"
+	SourceGORM      Source = "gorm"
+	SourceCalibrate Source = "calibrate"
+)
+
 // Finding 是一条采集/交叉验证/校准发现（门禁与报告共用）。
 type Finding struct {
-	Source   string // "migration" | "gorm" | "calibrate"
-	Severity string // "error" | "warn" | "info"
+	Source   Source
+	Severity Severity
 	Message  string
 }
 

@@ -37,7 +37,7 @@ func CrossCheck(st *Structure, models []gormModel) []Finding {
 		m := modelTables[name]
 		t, ok := structTables[name]
 		if !ok {
-			findings = append(findings, Finding{"gorm", "error",
+			findings = append(findings, Finding{SourceGORM, SeverityError,
 				fmt.Sprintf("模型表 %s（%s）不在迁移结构里（模型漂移或迁移语料漏采）", name, m.Struct)})
 			continue
 		}
@@ -49,18 +49,18 @@ func CrossCheck(st *Structure, models []gormModel) []Finding {
 		for _, col := range m.Columns {
 			sc, ok := structCols[col]
 			if !ok {
-				findings = append(findings, Finding{"gorm", "error",
+				findings = append(findings, Finding{SourceGORM, SeverityError,
 					fmt.Sprintf("模型列 %s.%s（%s）不在迁移结构里（模型漂移或迁移漏采）", name, col, m.Struct)})
 				continue
 			}
 			if mt, ok := m.Types[col]; ok && sc.Type != "" && !typeEquivalent(sc.Type, mt) {
-				findings = append(findings, Finding{"gorm", "warn",
+				findings = append(findings, Finding{SourceGORM, SeverityWarn,
 					fmt.Sprintf("列 %s.%s 类型不一致：迁移=%s 模型=%s", name, col, sc.Type, mt)})
 			}
 		}
 		for _, c := range t.Columns {
 			if !containsStr(m.Columns, c.Name) {
-				findings = append(findings, Finding{"gorm", "warn",
+				findings = append(findings, Finding{SourceGORM, SeverityWarn,
 					fmt.Sprintf("迁移列 %s.%s 无模型映射（模型未使用该列，属正常）", name, c.Name)})
 			}
 		}
@@ -68,7 +68,7 @@ func CrossCheck(st *Structure, models []gormModel) []Finding {
 
 	for _, t := range st.Tables {
 		if _, ok := modelTables[t.Name]; !ok {
-			findings = append(findings, Finding{"gorm", "warn",
+			findings = append(findings, Finding{SourceGORM, SeverityWarn,
 				fmt.Sprintf("迁移表 %s 无 GORM 模型覆盖（种子/纯迁移表属正常）", t.Name)})
 		}
 	}
@@ -95,7 +95,7 @@ func containsStr(list []string, s string) bool {
 
 // sortFindings 按（severity, message）排序——确定性输出契约。
 func sortFindings(fs []Finding) {
-	sev := map[string]int{"error": 0, "warn": 1, "info": 2}
+	sev := map[Severity]int{SeverityError: 0, SeverityWarn: 1, SeverityInfo: 2}
 	sort.Slice(fs, func(i, j int) bool {
 		if sev[fs[i].Severity] != sev[fs[j].Severity] {
 			return sev[fs[i].Severity] < sev[fs[j].Severity]
@@ -105,7 +105,7 @@ func sortFindings(fs []Finding) {
 }
 
 // countSeverity 统计某严重度数量。
-func countSeverity(fs []Finding, sev string) int {
+func countSeverity(fs []Finding, sev Severity) int {
 	n := 0
 	for _, f := range fs {
 		if f.Severity == sev {

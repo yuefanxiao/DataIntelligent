@@ -99,9 +99,8 @@ type NotAModel struct {
 			t.Errorf("audit_logs 嵌入 gorm.Model 应含 %s，实际 %v", c, audit.Columns)
 		}
 	}
-	bills := byTable["bills"]
-	if bills.Schema != "bill" {
-		t.Errorf("schema 限定 TableName 应记录 schema=bill, got %q", bills.Schema)
+	if _, ok := byTable["bills"]; !ok {
+		t.Error("schema 限定 TableName（bill.bills）应归一为 bills")
 	}
 }
 

@@ -3,7 +3,6 @@ package collector
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 )
 
 // ServiceResult 是一个服务的一次采集结果。
@@ -47,6 +46,9 @@ type CollectResult struct {
 // Collect 跑完整采集：manifest → 逐服务（迁移解析 → GORM 交叉验证 →
 // 草稿写出）→ 全量编译兼容检查。按清单顺序处理（确定性）。
 func Collect(cfg CollectConfig) (*CollectResult, error) {
+	if cfg.Manifest == nil {
+		return nil, fmt.Errorf("Collect 需要非空 Manifest")
+	}
 	res := &CollectResult{OutDir: cfg.OutDir}
 	for i := range cfg.Manifest.Services {
 		ms := &cfg.Manifest.Services[i]
@@ -69,15 +71,14 @@ func Collect(cfg CollectConfig) (*CollectResult, error) {
 
 // collectService 采集一个服务：解析迁移 → 交叉验证 → 写草稿。
 func collectService(cfg CollectConfig, ms *ManifestService) (*ServiceResult, error) {
-	dir := ms.ServiceDir(cfg.Repo)
-	files, err := DiscoverMigrations(dir)
+	st, findings, err := ParseServiceMigrations(ms, cfg.Repo)
 	if err != nil {
-		return nil, fmt.Errorf("服务 %s: %w", ms.Name, err)
+		return nil, err
 	}
-	st, findings := ParseMigrations(ms.Name, ms.DB, files)
+	findings = append(findings, unresolvedRefFindings(st)...)
 
 	if cfg.GORM {
-		models, gormFindings := ExtractGormModels(filepath.Join(dir, ms.ModelsDir))
+		models, gormFindings := ExtractGormModels(filepath.Join(ms.ServiceDir(cfg.Repo), ms.ModelsDir))
 		findings = append(findings, gormFindings...)
 		findings = append(findings, CrossCheck(st, models)...)
 	}
@@ -102,12 +103,31 @@ func (r *ServiceResult) PrintFindings() int {
 	return r.Errors()
 }
 
-// SortedServiceNames 返回已采集服务的名字（确定性输出）。
-func (r *CollectResult) SortedServiceNames() []string {
-	names := make([]string, 0, len(r.Services))
-	for _, s := range r.Services {
-		names = append(names, s.Name)
+// ParseServiceMigrations 是「按清单条目解析一个服务的迁移」的共享入口
+// （scan 与 calibrate 的基线同源：calibrate 对照的就是草稿的推导源）。
+func ParseServiceMigrations(ms *ManifestService, repo string) (*Structure, []Finding, error) {
+	files, err := DiscoverMigrations(ms.ServiceDir(repo))
+	if err != nil {
+		return nil, nil, fmt.Errorf("服务 %s: %w", ms.Name, err)
 	}
-	sort.Strings(names)
-	return names
+	st, findings := ParseMigrations(ms.Name, ms.DB, files)
+	return st, findings, nil
+}
+
+// unresolvedRefFindings 报告引用边目标不在本服务结构内的发现
+// （跨服务 FK 无法编 FQN——目标服务名未知；提示人工确认，
+// 采集产出的引用边只保留同服务目标，draft.go 侧同样跳过）。
+func unresolvedRefFindings(st *Structure) []Finding {
+	var fs []Finding
+	for _, t := range st.Tables {
+		for _, r := range t.References {
+			if st.findTable(r.TargetTable) == nil {
+				fs = append(fs, Finding{SourceMigration, SeverityWarn,
+					fmt.Sprintf("表 %s 的外键引用目标 %s 不在本服务结构内（跨服务 FK 不进草稿引用边，请人工确认）",
+						t.Name, r.TargetTable)})
+			}
+		}
+	}
+	sortFindings(fs)
+	return fs
 }

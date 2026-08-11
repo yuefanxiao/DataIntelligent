@@ -37,16 +37,10 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 	}
 	defer conn.Close(ctx)
 
-	// 草稿侧 schema 集（public 语义 = information_schema 的 public）。
-	schemas := map[string]bool{}
-	for _, t := range st.Tables {
-		s := t.Schema
-		if s == "" {
-			s = "public"
-		}
-		schemas[s] = true
-	}
-	live, err := introspect(ctx, conn, schemas)
+	// 生产形态 = 每服务一库：连接的库即服务边界，全 schema 扫描
+	// （限制在草稿 schema 会让「生产表草稿缺失」漏掉迁移新建的
+	// schema 里的表）。
+	live, err := introspect(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -54,13 +48,13 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 	var findings []Finding
 	liveByTable := map[string]*liveTable{}
 	for i := range live {
-		liveByTable[live[i].Name] = &live[i]
+		liveByTable[qualKey(live[i].Schema, live[i].Name)] = &live[i]
 	}
 	// 草稿有而 PG 没有 = error（草稿编错了表/列——校准抓的就是这个）。
 	for _, t := range st.Tables {
-		lt, ok := liveByTable[t.Name]
+		lt, ok := liveByTable[qualKey(schemaOrPublic(t.Schema), t.Name)]
 		if !ok {
-			findings = append(findings, Finding{"calibrate", "error",
+			findings = append(findings, Finding{SourceCalibrate, SeverityError,
 				fmt.Sprintf("草稿表 %s 在生产库不存在（schema %q 未建表或表名不一致）", t.Name, schemaOrPublic(t.Schema))})
 			continue
 		}
@@ -71,20 +65,20 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 		for _, c := range t.Columns {
 			lt, ok := liveCols[c.Name]
 			if !ok {
-				findings = append(findings, Finding{"calibrate", "error",
+				findings = append(findings, Finding{SourceCalibrate, SeverityError,
 					fmt.Sprintf("草稿列 %s.%s 在生产库不存在", t.Name, c.Name)})
 				continue
 			}
 			// 类型比较用归一化等价（varchar(128) vs character
 			// varying(128) 同型；带 typmod 的差异才是漂移信号）。
 			if draftTypeToInfoSchema(c.Type) != lt {
-				findings = append(findings, Finding{"calibrate", "warn",
+				findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
 					fmt.Sprintf("列 %s.%s 类型漂移：草稿=%s 生产=%s", t.Name, c.Name, c.Type, lt)})
 			}
 		}
 		for _, lc := range lt.Columns {
 			if st.findTable(t.Name).findColumn(lc.Name) == nil {
-				findings = append(findings, Finding{"calibrate", "warn",
+				findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
 					fmt.Sprintf("生产列 %s.%s 草稿缺失（迁移文件未建/迁移滞后，提示性）", t.Name, lc.Name)})
 			}
 		}
@@ -92,8 +86,11 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 	// PG 有而草稿没有的表 = warn（手工 DDL 先例（payment_channel 事件）
 	// 正是校准要暴露的漂移）。
 	for _, lt := range live {
+		if _, ok := liveByTable[qualKey(lt.Schema, lt.Name)]; !ok {
+			continue
+		}
 		if st.findTable(lt.Name) == nil {
-			findings = append(findings, Finding{"calibrate", "warn",
+			findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
 				fmt.Sprintf("生产表 %s.%s 草稿缺失（迁移外手工 DDL 或迁移滞后）", lt.Schema, lt.Name)})
 		}
 	}
@@ -101,22 +98,21 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 	return findings, nil
 }
 
-// introspect 查 information_schema.columns（schema 过滤 + 排除系统表）。
+// qualKey 拼 schema.表 复合键（同名表跨 schema 不互相干扰）。
+func qualKey(schema, name string) string { return schema + "." + name }
+
+// introspect 查 information_schema.columns（排除系统 schema/表）。
 // 类型归一化：data_type + character_maximum_length/numeric_precision/
-// numeric_scale/datetime_precision 拼回带 typmod 形态，与草稿可比。
-func introspect(ctx context.Context, conn *pgx.Conn, schemas map[string]bool) ([]liveTable, error) {
-	names := make([]string, 0, len(schemas))
-	for s := range schemas {
-		names = append(names, s)
-	}
-	sort.Strings(names)
+// numeric_scale 拼回带 typmod 形态，与草稿可比。
+func introspect(ctx context.Context, conn *pgx.Conn) ([]liveTable, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT table_schema, table_name, column_name, data_type,
 		       character_maximum_length, numeric_precision, numeric_scale
 		FROM information_schema.columns
-		WHERE table_schema = ANY($1)
+		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+		  AND table_schema NOT LIKE 'pg_toast%'
 		  AND table_name NOT LIKE 'pg_%'
-		ORDER BY table_schema, table_name, ordinal_position`, names)
+		ORDER BY table_schema, table_name, ordinal_position`)
 	if err != nil {
 		return nil, fmt.Errorf("查询 information_schema.columns 失败: %w", err)
 	}
@@ -136,7 +132,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, schemas map[string]bool) ([
 			byName[table] = t
 			order = append(order, table)
 		}
-		t.Columns = append(t.Columns, liveColumn{Name: column, Type: normalizeInfoSchemaType(typ, charLen, numPrec, numScale, nil)})
+		t.Columns = append(t.Columns, liveColumn{Name: column, Type: normalizeInfoSchemaType(typ, charLen, numPrec, numScale)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -152,7 +148,7 @@ func introspect(ctx context.Context, conn *pgx.Conn, schemas map[string]bool) ([
 // normalizeInfoSchemaType 把 information_schema 的类型字段归一为
 // 与草稿可比的形态：varchar(128) → character varying(128)、
 // numeric(30,12) → numeric(30,12)、无 typmod → 原名。
-func normalizeInfoSchemaType(typ string, charLen, numPrec, numScale, _ *int) string {
+func normalizeInfoSchemaType(typ string, charLen, numPrec, numScale *int) string {
 	switch typ {
 	case "character varying":
 		if charLen != nil {
