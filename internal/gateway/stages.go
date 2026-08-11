@@ -32,8 +32,9 @@ func withStageTimer(ctx context.Context, t *stageTimer) context.Context {
 	return context.WithValue(ctx, stageTimerKey{}, t)
 }
 
-// stageTimerFrom 取上下文里的累积器（logged 注入）；不存在时新建（防御：
-// 测试直接调用 handler 的路径）。
+// stageTimerFrom 取上下文里的累积器（logged 注入）；不存在时新建——防御
+// 分支是真实路径：测试直接调用 handleExecuteSQL 不经过 logged（阶段打点
+// 依旧工作，只是没有 wrapper 的 return/auth）。
 func stageTimerFrom(ctx context.Context) *stageTimer {
 	if t, ok := ctx.Value(stageTimerKey{}).(*stageTimer); ok {
 		return t
@@ -41,7 +42,7 @@ func stageTimerFrom(ctx context.Context) *stageTimer {
 	return &stageTimer{stages: map[string]time.Duration{}}
 }
 
-// newStageTimer 从调用上下文取/建累积器，并注入 HTTP 形态的认证耗时：
+// newStageTimer 取调用上下文的耗时累积器并注入 HTTP 形态的认证耗时：
 // verifyToken 把 VerifyKey 实测耗时写进 TokenInfo.Extra["auth_ms"]（SDK
 // 中间件把同一 TokenInfo 挂进调用上下文，handler 侧可读——与 key_id 同一
 // 机制）。stdio 形态无 per-call 认证，该阶段不打点（如实缺失）。

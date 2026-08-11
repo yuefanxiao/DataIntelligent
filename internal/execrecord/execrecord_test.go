@@ -303,6 +303,41 @@ func TestSummarizeIdempotent(t *testing.T) {
 	}
 }
 
+// 自愈：聚合摘要失败（如原始文件临时不可读）后记录器不哑死——l.day 保持
+// 前一日，下次写入重试摘要（幂等），成功才推进到新日文件。
+func TestRolloverSelfHeal(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	// 让 d1 原始文件不可读 → 跨日轮转的摘要步骤失败（写入报错、状态保留）
+	raw := filepath.Join(dir, "raw-2026-08-11.jsonl")
+	if err := os.Chmod(raw, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err == nil {
+		t.Fatal("摘要失败应返回错误（写入不静默吞掉）")
+	}
+	// 恢复可读 → 下次写入重试摘要成功，记录器自愈
+	if err := os.Chmod(raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatalf("恢复后写入应成功: %v", err)
+	}
+	// d1 摘要已补生成（幂等恢复）；恢复后的 d2 记录正常落新日文件
+	// （失败那次写入未落盘——记录丢弃但错误如实上报，fail-open 语义）。
+	if got := len(readLines(t, filepath.Join(dir, "summary-2026-08-11.jsonl"))); got != 1 {
+		t.Fatalf("d1 摘要行数 = %d，期望 1（自愈补摘要）", got)
+	}
+	if got := len(readLines(t, filepath.Join(dir, "raw-2026-08-12.jsonl"))); got != 1 {
+		t.Fatalf("d2 记录数 = %d，期望 1（失败写入不落盘，恢复后正常）", got)
+	}
+}
+
 // ── 聚合摘要（喂知识采集信号：被拒查询分布 / 原料路径 / 搜索关键词）───────
 
 // 摘要内容：各工具调用分布（总/成功/拒绝/超时/解析失败/行数/截断）、
@@ -419,17 +454,14 @@ func TestReplayChain(t *testing.T) {
 	}
 	var got []replayed
 	for _, line := range readLines(t, filepath.Join(dir, rawName(dayOf(ts)))) {
-		var rec wireRecord
+		var rec ToolCall
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("重放解析失败: %v\n%s", err, line)
 		}
 		r := replayed{tool: rec.Tool, status: rec.Status, planID: rec.PlanID, stages: len(rec.StagesMS)}
-		if rec.Params != nil {
-			var p struct {
-				SQL string `json:"sql"`
-			}
-			if err := json.Unmarshal(rec.Params, &p); err == nil {
-				r.sql = p.SQL
+		if p, ok := rec.Params.(map[string]any); ok {
+			if s, ok := p["sql"].(string); ok {
+				r.sql = s
 			}
 		}
 		if rec.Rows != nil {
@@ -439,13 +471,8 @@ func TestReplayChain(t *testing.T) {
 			r.truncated = *rec.Truncated
 		}
 		if rec.Reject != nil {
-			var e struct {
-				Details map[string]any `json:"details"`
-			}
-			if json.Unmarshal(rec.Reject, &e) == nil {
-				if reason, ok := e.Details["reason"].(string); ok {
-					r.rejectReason = reason
-				}
+			if reason, ok := rec.Reject.Details["reason"].(string); ok {
+				r.rejectReason = reason
 			}
 		}
 		got = append(got, r)

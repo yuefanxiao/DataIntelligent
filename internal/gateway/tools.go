@@ -88,10 +88,11 @@ func logged[In, Out any](g *Gateway, tool string, h mcp.ToolHandlerFor[In, Out])
 		if g.execlog == nil {
 			return h(ctx, req, input)
 		}
+		callStart := time.Now()
 		timer := newStageTimer(ctx)
 		res, out, err := h(withStageTimer(ctx, timer), req, input)
 		retStart := time.Now()
-		rec := buildToolRecord(ctx, timer, tool, input, res, out, err)
+		rec := buildToolRecord(ctx, timer, callStart, tool, input, res, out, err)
 		timer.Add(execrecord.StageReturn, time.Since(retStart))
 		rec.StagesMS = timer.ms()
 		if lerr := g.execlog.LogToolCall(rec); lerr != nil {
@@ -103,12 +104,13 @@ func logged[In, Out any](g *Gateway, tool string, h mcp.ToolHandlerFor[In, Out])
 
 // buildToolRecord 组装工具调用的执行记录：状态由结果/错误推导（成功/拒绝/
 // 超时/解析失败），被拒原因 = gwerr 原文（如实）；execute_sql 成功结果附带
-// 行数/truncated/plan_id（结果元信息）。
-func buildToolRecord[In, Out any](ctx context.Context, timer *stageTimer, tool string, input In, res *mcp.CallToolResult, out Out, err error) execrecord.ToolCall {
+// 行数/truncated/plan_id（结果元信息）。ts 用调用开始时刻（跨零点调用落
+// 发起日文件）。
+func buildToolRecord[In, Out any](ctx context.Context, timer *stageTimer, callStart time.Time, tool string, input In, res *mcp.CallToolResult, out Out, err error) execrecord.ToolCall {
 	user, _ := UserFromContext(ctx)
 	key, _ := KeyFromContext(ctx)
 	rec := execrecord.ToolCall{
-		TS:     time.Now(),
+		TS:     callStart,
 		User:   user,
 		Key:    key,
 		Tool:   tool,

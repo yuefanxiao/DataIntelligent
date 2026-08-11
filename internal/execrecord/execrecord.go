@@ -53,11 +53,11 @@ const (
 // 分阶段耗时键（spec §4.6：认证→权限→解析→执行→返回；缺失 = 未打点，
 // 如 stdio 形态无 per-call 认证）。网关在各阶段位置打点，本包只负责落盘。
 const (
-	StageAuth   = "auth"   // 认证：HTTP verifyToken 耗时
+	StageAuth   = "auth"   // 认证：HTTP verifyToken 实测耗时
 	StagePerm   = "perm"   // 权限：表授权比对耗时
 	StageParse  = "parse"  // 解析：AST 分类 + 表提取
 	StageExec   = "exec"   // 执行：查询 + 结果编码
-	StageReturn = "return" // 返回：记录组装/落盘耗时
+	StageReturn = "return" // 返回：结果/记录组装耗时（落盘是记录器内部开销，不进调用链阶段）
 )
 
 // key 生命周期事件（kind=key_lifecycle 的 event 字段）。
@@ -224,16 +224,23 @@ func (l *Logger) write(ts time.Time, rec any) error {
 }
 
 // rollover 打开指定日的原始文件：前一日文件收尾（关闭 + 幂等聚合摘要）→
-// 打开新日文件 → 保留期清理。保留期/摘要失败返回错误（下次写入重试，摘要
-// 幂等可自愈）。
+// 打开新日文件 → 保留期清理。
+//
+// 失败路径状态干净可自愈：旧文件关闭后立即置 nil；摘要失败时 l.day 保持
+// 前一日——下次写入重试该日摘要（幂等，成功才推进状态），记录器不会停留
+// 在「文件已关但日期未推进」的哑死状态。
 func (l *Logger) rollover(day string) error {
 	if l.day != "" {
-		if err := l.rawFile.Close(); err != nil {
-			return fmt.Errorf("关闭 %s: %w", rawName(l.day), err)
+		if l.rawFile != nil {
+			if err := l.rawFile.Close(); err != nil {
+				return fmt.Errorf("关闭 %s: %w", rawName(l.day), err)
+			}
+			l.rawFile = nil
 		}
 		if err := l.summarize(l.day); err != nil {
 			return fmt.Errorf("聚合摘要 %s: %w", l.day, err)
 		}
+		l.day = ""
 	}
 	f, err := os.OpenFile(filepath.Join(l.dir, rawName(day)), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -248,10 +255,8 @@ func (l *Logger) rollover(day string) error {
 // 前一日摘要可能未生成）；摘要按保留期直接删除。日期比较用 "2006-01-02"
 // 字符串序（零填充，字典序即时间序）。
 func (l *Logger) prune() error {
-	today := dayOf(l.now())
 	rawCutoff := dayOf(l.now().AddDate(0, 0, -l.rawRetention))
 	sumCutoff := dayOf(l.now().AddDate(0, 0, -l.summaryRetention))
-	_ = today // 打开文件日不参与清理（保留期内）
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return fmt.Errorf("列执行记录目录: %w", err)
@@ -321,23 +326,6 @@ func (l *Logger) summarize(date string) error {
 
 // ── 聚合 ─────────────────────────────────────────────────────────────────
 
-// wireRecord 是 JSONL 行的解析形态（聚合与重放共用：字段全集见包文档契约）。
-type wireRecord struct {
-	Kind      string           `json:"kind"`
-	TS        time.Time        `json:"ts"`
-	User      string           `json:"user"`
-	Key       string           `json:"key"`
-	Tool      string           `json:"tool"`
-	Params    json.RawMessage  `json:"params"`
-	StagesMS  map[string]int64 `json:"stages_ms"`
-	Status    string           `json:"status"`
-	Rows      *int             `json:"rows"`
-	Truncated *bool            `json:"truncated"`
-	PlanID    string           `json:"plan_id"`
-	Reject    json.RawMessage  `json:"reject"`
-	Event     string           `json:"event"`
-}
-
 // toolStats 是单工具调用分布（摘要的 calls 值）。
 type toolStats struct {
 	Calls      int `json:"calls"`
@@ -384,15 +372,23 @@ func aggregateFile(path string) (*dailySummary, error) {
 		if line == "" {
 			continue
 		}
-		var rec wireRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		// 记录字段契约的单一事实源 = ToolCall（写入形态已平铺，解析直接
+		// 复用——无第二份字段清单）；kind 单独分派。
+		var kind struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal([]byte(line), &kind) != nil {
 			continue // 坏行跳过（尽力而为的信号源）
 		}
-		if sum.Date == "" {
-			sum.Date = dayOf(rec.TS)
-		}
-		switch rec.Kind {
+		switch kind.Kind {
 		case KindToolCall:
+			var rec ToolCall
+			if json.Unmarshal([]byte(line), &rec) != nil {
+				continue
+			}
+			if sum.Date == "" {
+				sum.Date = dayOf(rec.TS)
+			}
 			st := sum.Calls[rec.Tool]
 			st.Calls++
 			switch rec.Status {
@@ -416,14 +412,19 @@ func aggregateFile(path string) (*dailySummary, error) {
 				sum.Rejects[rejectKey(rec.Reject)]++
 			}
 			if rec.Tool == "search_entities" {
-				var p struct {
-					Query string `json:"query"`
-				}
-				if json.Unmarshal(rec.Params, &p) == nil && p.Query != "" {
-					kwCount[p.Query]++
+				if p, ok := rec.Params.(map[string]any); ok {
+					if q, ok := p["query"].(string); ok && q != "" {
+						kwCount[q]++
+					}
 				}
 			}
 		case KindAuthFailure:
+			var rec struct {
+				Reject *gwerr.Error `json:"reject"`
+			}
+			if json.Unmarshal([]byte(line), &rec) != nil || rec.Reject == nil {
+				continue
+			}
 			sum.Rejects[rejectKey(rec.Reject)]++
 		case KindKeyLifecycle:
 			// key 生命周期不是查询信号，不进聚合
@@ -450,18 +451,14 @@ func aggregateFile(path string) (*dailySummary, error) {
 // rejectKey 是「被拒原因」的聚合键：details.reason 优先（机器可区分的拒绝
 // 类别，如 not_granted/timeout/syntax_error），缺省退回 kind（unauthorized
 // 等无 reason 的拒绝）。
-func rejectKey(reject json.RawMessage) string {
-	var e struct {
-		Kind    string         `json:"kind"`
-		Details map[string]any `json:"details"`
-	}
-	if json.Unmarshal(reject, &e) != nil {
+func rejectKey(e *gwerr.Error) string {
+	if e == nil {
 		return "unknown"
 	}
 	if r, ok := e.Details["reason"].(string); ok && r != "" {
 		return r
 	}
-	return e.Kind
+	return string(e.Kind)
 }
 
 // ── 文件名与日期 ─────────────────────────────────────────────────────────

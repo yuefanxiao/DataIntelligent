@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -70,9 +71,21 @@ func structuredAuth(verifier auth.TokenVerifier, next http.Handler, onFail func(
 		AllowMissingExpiration: true, // opaque key 无过期字段（ADR-0004）
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		aw := &authResponseWriter{ResponseWriter: w, onFail: onFail}
+		aw := &authResponseWriter{
+			ResponseWriter: w,
+			missingBearer:  !hasBearer(r),
+			onFail:         onFail,
+		}
 		sdkMW(next).ServeHTTP(aw, r)
 	})
+}
+
+// hasBearer 粗略判断请求是否携带 bearer 形态的凭据（SDK 中间件的失败原因
+// 不外传，认证失败记录按此预判区分「缺凭据 vs 凭据无效」——被拒原因如实
+// 的最接近粒度）。
+func hasBearer(r *http.Request) bool {
+	f := strings.Fields(r.Header.Get("Authorization"))
+	return len(f) == 2 && strings.EqualFold(f[0], "bearer") && f[1] != ""
 }
 
 // authResponseWriter 把 SDK 中间件写出的认证失败响应改写成 gwerr JSON：
@@ -80,8 +93,9 @@ func structuredAuth(verifier auth.TokenVerifier, next http.Handler, onFail func(
 // 执行记录。其余状态码/成功流原样透传（不做缓冲，SSE 流式不受影响）。
 type authResponseWriter struct {
 	http.ResponseWriter
-	authFailed bool
-	onFail     func(message string)
+	authFailed    bool
+	missingBearer bool // 请求未携带 bearer 凭据（401 原因区分）
+	onFail        func(message string)
 }
 
 // Unwrap 让 http.NewResponseController 能穿透本包装找到底层 Flusher——
@@ -89,21 +103,9 @@ type authResponseWriter struct {
 func (w *authResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *authResponseWriter) WriteHeader(code int) {
-	if code == http.StatusForbidden && !w.authFailed {
+	if (code == http.StatusForbidden || code == http.StatusUnauthorized) && !w.authFailed {
 		w.authFailed = true
-		msg := "session user mismatch"
-		if w.onFail != nil {
-			w.onFail(msg)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.ResponseWriter.WriteHeader(code)
-		_, _ = w.ResponseWriter.Write(gwerr.Unauthorized(msg).JSON())
-		return
-	}
-	if code == http.StatusUnauthorized && !w.authFailed {
-		w.authFailed = true
-		msg := "missing or invalid bearer key"
+		msg := w.authMessage(code)
 		if w.onFail != nil {
 			w.onFail(msg)
 		}
@@ -114,6 +116,19 @@ func (w *authResponseWriter) WriteHeader(code int) {
 		return
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// authMessage 是认证失败的结构化文案：403 = 会话用户不匹配（SDK session
+// hijack 检测）；401 区分缺凭据/凭据无效（被拒原因如实）。
+func (w *authResponseWriter) authMessage(code int) string {
+	switch {
+	case code == http.StatusForbidden:
+		return "session user mismatch"
+	case w.missingBearer:
+		return "missing bearer key"
+	default:
+		return "invalid or revoked bearer key"
+	}
 }
 
 // Write 在认证失败后吞掉 SDK 后续写入的纯文本错误。

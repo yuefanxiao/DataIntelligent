@@ -118,33 +118,36 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 	// 语句计数先于 Check（Check 内部会再解析一次——WASM 解析毫秒级，可接受）：
 	// 0 条 = 纯注释等无可执行内容；>1 条 = 批处理（pgx 单语句协议 + 包层括号
 	// 内不允许语句分隔，v1 无批处理语义）——都显式结构化拒绝，避免误导性 42601。
+	// 解析阶段打点统一收敛：= 链总耗时减权限比对（Check 内部：解析→分类→
+	// 提取→逐表比对，唯一的外部回调是 allow——perm 已单独打点，不重叠）。
 	parseStart := time.Now()
+	addParse := func() {
+		timer.Add(execrecord.StageParse, time.Since(parseStart)-timer.Get(execrecord.StagePerm))
+	}
 	stmts, perr := validate.Parse(in.SQL)
 	if perr != nil {
-		timer.Add(execrecord.StageParse, time.Since(parseStart))
+		addParse()
 		return errResult(perr), nil, nil
 	}
 	if len(stmts) == 0 {
-		timer.Add(execrecord.StageParse, time.Since(parseStart))
+		addParse()
 		return errResult(gwerr.InvalidRequest(
 			"SQL 不含可执行语句（仅注释/空白）",
 			map[string]any{"reason": "empty"},
 		)), nil, nil
 	}
 	if len(stmts) > 1 {
-		timer.Add(execrecord.StageParse, time.Since(parseStart))
+		addParse()
 		return errResult(gwerr.InvalidRequest(
 			"多条语句不被支持（execute_sql 一次执行一条只读查询）",
 			map[string]any{"reason": "multi_statement"},
 		)), nil, nil
 	}
 	if _, verr := validate.Check(in.SQL, resolve, allow); verr != nil {
-		// 解析阶段 = 链总耗时减权限比对（Check 内部：解析→分类→提取→逐表
-		// 比对，唯一的外部回调是 allow（perm 已单独打点），不重叠）。
-		timer.Add(execrecord.StageParse, time.Since(parseStart)-timer.Get(execrecord.StagePerm))
+		addParse()
 		return errResult(verr), nil, nil
 	}
-	timer.Add(execrecord.StageParse, time.Since(parseStart)-timer.Get(execrecord.StagePerm))
+	addParse()
 
 	// ── 段 3+4：限额包层执行 + 结果编码 ───────────────────────────────────
 	execStart := time.Now()

@@ -92,6 +92,26 @@ type KeyInfo struct {
 	RevokedAt string // 空串 = 有效
 }
 
+// Get 按行 ID 取一把 key 的快照（吊销命令寻址/生命周期记录的属主查询；
+// 不存在返回 false）。
+func Get(ctx context.Context, db *sql.DB, id int64) (KeyInfo, bool, error) {
+	var k KeyInfo
+	var revokedAt sql.NullString
+	err := db.QueryRowContext(ctx,
+		"SELECT id, user_id, created_at, revoked_at FROM dgw_credentials WHERE id = ?",
+		id).Scan(&k.ID, &k.UserID, &k.CreatedAt, &revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return KeyInfo{}, false, nil
+	}
+	if err != nil {
+		return KeyInfo{}, false, fmt.Errorf("lookup key %d: %w", id, err)
+	}
+	if revokedAt.Valid {
+		k.RevokedAt = revokedAt.String
+	}
+	return k, true, nil
+}
+
 // List 返回全部 key 的快照（按创建时间升序），供授权快照/吊销寻址。
 func List(ctx context.Context, db *sql.DB) ([]KeyInfo, error) {
 	rows, err := db.QueryContext(ctx,

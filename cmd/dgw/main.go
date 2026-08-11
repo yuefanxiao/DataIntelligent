@@ -163,17 +163,32 @@ func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 
 // execLog 打开执行记录写入器（06 票；spec §4.9 参数表：原始 7 天轮转 +
 // 聚合摘要 30 天，env 可覆盖；ADR-0009 部署 volume /logs）。目录不可建/
-// 保留期非法 = 启动失败（配置错误 fail fast）。
+// 保留期非法 = 启动失败（配置错误 fail fast）——serve 形态专用：守护进程
+// 的记录设施必须可用；一次性 CLI 命令（key-create/revoke）用 openExecLog
+// 降级（记录失败不影响命令结果，ADR-0006「故障响应不依赖任何审计设施」）。
 func execLog(cfg config.Config) *execrecord.Logger {
-	l, err := execrecord.New(execrecord.Config{
-		Dir:                  cfg.ExecLogDir,
-		RawRetentionDays:     cfg.ExecRawRetentionDays,
-		SummaryRetentionDays: cfg.ExecSummaryRetentionDays,
-	})
+	l, err := openExecLog(cfg)
 	if err != nil {
 		log.Fatalf("执行记录初始化失败: %v", err)
 	}
 	return l
+}
+
+// openExecLog 是 execLog 的非致命形态（返回错误由调用方决定处理）。
+func openExecLog(cfg config.Config) (*execrecord.Logger, error) {
+	return execrecord.New(execrecord.Config{
+		Dir:                  cfg.ExecLogDir,
+		RawRetentionDays:     cfg.ExecRawRetentionDays,
+		SummaryRetentionDays: cfg.ExecSummaryRetentionDays,
+	})
+}
+
+// logKeyLifecycle 落一行 key 生命周期记录（CLI 侧，spec §4.6「各记一行」）。
+// 记录失败只记日志——命令结果不依赖审计设施（ADR-0006）。
+func logKeyLifecycle(lg *execrecord.Logger, kc execrecord.KeyLifecycle) {
+	if err := lg.LogKeyLifecycle(kc); err != nil {
+		log.Printf("执行记录写入失败: %v", err)
+	}
 }
 
 func cmdServe() {
@@ -242,6 +257,13 @@ func cmdKeyCreate() {
 		log.Fatal("key-create 需要 --user（绑定用户身份）")
 	}
 	cfg := config.FromEnv()
+	// 执行记录器先开（降级：目录不可写只记日志，不阻止 key 创建——否则
+	// key 已落库而进程死于明文打印前，明文永久丢失）。
+	lg, err := openExecLog(cfg)
+	if err != nil {
+		log.Printf("执行记录不可用（继续，不阻塞命令）: %v", err)
+		lg = nil
+	}
 	st := openStore(*dbPath)
 	defer st.Close()
 
@@ -249,13 +271,12 @@ func cmdKeyCreate() {
 	if err != nil {
 		log.Fatalf("创建凭据失败: %v", err)
 	}
-	// key 生命周期执行记录（06 票：CLI 侧一行；记录失败不影响命令结果）。
-	lg := execLog(cfg)
-	defer lg.Close()
-	if err := lg.LogKeyLifecycle(execrecord.KeyLifecycle{
-		TS: time.Now(), Event: execrecord.EventKeyCreated, User: *user, Key: strconv.FormatInt(id, 10),
-	}); err != nil {
-		log.Printf("执行记录写入失败: %v", err)
+	// key 生命周期执行记录（06 票：CLI 侧一行）。
+	if lg != nil {
+		defer lg.Close()
+		logKeyLifecycle(lg, execrecord.KeyLifecycle{
+			TS: time.Now(), Event: execrecord.EventKeyCreated, User: *user, Key: strconv.FormatInt(id, 10),
+		})
 	}
 	// 明文仅此一次打印；哈希已落库，此后任何地方不再持有明文。
 	fmt.Printf("dgw: 新凭据（用户 %s）——明文仅打印一次，请立即保存：\n%s\n", *user, plain)
@@ -275,6 +296,12 @@ func cmdKeyRevoke() {
 		log.Fatalf("key ID 应为数字: %q", *id)
 	}
 	cfg := config.FromEnv()
+	// 执行记录器先开（降级：目录不可写不阻止吊销——命令结果不依赖记录）。
+	lg, err := openExecLog(cfg)
+	if err != nil {
+		log.Printf("执行记录不可用（继续，不阻塞命令）: %v", err)
+		lg = nil
+	}
 	st := openStore(*dbPath)
 	defer st.Close()
 
@@ -285,13 +312,12 @@ func cmdKeyRevoke() {
 	if revoked {
 		// key 生命周期执行记录（06 票：CLI 侧一行；吊销成功才记——幂等
 		// 无操作不伪造事件；被吊销 key 的属主从快照取）。
-		lg := execLog(cfg)
-		defer lg.Close()
-		if err := lg.LogKeyLifecycle(execrecord.KeyLifecycle{
-			TS: time.Now(), Event: execrecord.EventKeyRevoked,
-			User: keyOwner(context.Background(), st, idNum), Key: *id,
-		}); err != nil {
-			log.Printf("执行记录写入失败: %v", err)
+		if lg != nil {
+			defer lg.Close()
+			logKeyLifecycle(lg, execrecord.KeyLifecycle{
+				TS: time.Now(), Event: execrecord.EventKeyRevoked,
+				User: keyOwner(context.Background(), st, idNum), Key: *id,
+			})
 		}
 		fmt.Printf("dgw: 已吊销 key #%d（即时生效）\n", idNum)
 	} else {
@@ -301,16 +327,11 @@ func cmdKeyRevoke() {
 
 // keyOwner 查一把 key 的绑定用户（吊销记录的属主字段；key 不存在返回空串）。
 func keyOwner(ctx context.Context, st *store.Store, id int64) string {
-	keys, err := credentials.List(ctx, st.DB())
-	if err != nil {
+	k, ok, err := credentials.Get(ctx, st.DB(), id)
+	if err != nil || !ok {
 		return ""
 	}
-	for _, k := range keys {
-		if k.ID == id {
-			return k.UserID
-		}
-	}
-	return ""
+	return k.UserID
 }
 
 // grantCmd 解析 grant-add / grant-remove 的公共 flag。
