@@ -46,6 +46,15 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 		return nil, fmt.Errorf("连接校准库失败（请核对只读从库 DSN）: %w", err)
 	}
 	defer conn.Close(ctx)
+	// 只读确证：启动参数可能被连接池/代理剥离——「只报告不改」是
+	// ADR-0007 的承诺，会话必须实测只读，否则拒绝继续。
+	var ro string
+	if err := conn.QueryRow(ctx, "SHOW default_transaction_read_only").Scan(&ro); err != nil {
+		return nil, fmt.Errorf("确证只读会话失败: %w", err)
+	}
+	if ro != "on" {
+		return nil, fmt.Errorf("校准会话不是只读（default_transaction_read_only=%s）——拒绝继续，请用只读从库角色", ro)
+	}
 
 	// 生产形态 = 每服务一库：连接的库即服务边界，全 schema 扫描
 	// （限制在草稿 schema 会让「生产表草稿缺失」漏掉迁移新建的
@@ -87,22 +96,26 @@ func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error
 			}
 		}
 		for _, lc := range lt.Columns {
-			if st.findTable(t.Name).findColumn(lc.Name) == nil {
+			// 草稿侧表已在上方按 schema.表 匹配（t）；列缺失 = 迁移
+			// 文件未建/迁移滞后（提示性）。
+			if t.findColumn(lc.Name) == nil {
 				findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
 					fmt.Sprintf("生产列 %s.%s 草稿缺失（迁移文件未建/迁移滞后，提示性）", t.Name, lc.Name)})
 			}
 		}
 	}
 	// PG 有而草稿没有的表 = warn（手工 DDL 先例（payment_channel 事件）
-	// 正是校准要暴露的漂移）。
+	// 正是校准要暴露的漂移）。按 schema.表 复合键匹配草稿。
+	draftKeys := map[string]bool{}
+	for _, t := range st.Tables {
+		draftKeys[qualKey(schemaOrPublic(t.Schema), t.Name)] = true
+	}
 	for _, lt := range live {
-		if _, ok := liveByTable[qualKey(lt.Schema, lt.Name)]; !ok {
+		if draftKeys[qualKey(lt.Schema, lt.Name)] {
 			continue
 		}
-		if st.findTable(lt.Name) == nil {
-			findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
-				fmt.Sprintf("生产表 %s.%s 草稿缺失（迁移外手工 DDL 或迁移滞后）", lt.Schema, lt.Name)})
-		}
+		findings = append(findings, Finding{SourceCalibrate, SeverityWarn,
+			fmt.Sprintf("生产表 %s.%s 草稿缺失（迁移外手工 DDL 或迁移滞后）", lt.Schema, lt.Name)})
 	}
 	sortFindings(findings)
 	return findings, nil

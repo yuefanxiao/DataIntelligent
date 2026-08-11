@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -92,6 +93,9 @@ func cmdScan() int {
 	noGorm := fs.Bool("no-gorm", false, "跳过 GORM 交叉验证")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(os.Args[2:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0 // -h 是显式请求帮助，不是失败
+		}
 		return 1 // flag 用法错误 = 操作失败（1），与「2 = 门禁发现」区分
 	}
 
@@ -145,6 +149,9 @@ func cmdCalibrate() int {
 	dsn := fs.String("dsn", os.Getenv("DGW_COLLECT_DSN"), "只读从库连接串（可经 DGW_COLLECT_DSN env 传入，避免 argv 泄露口令）")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(os.Args[2:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
@@ -172,7 +179,7 @@ func cmdCalibrate() int {
 			migrationErrors++
 		}
 	}
-	if len(st.Tables) == 0 {
+	if len(st.Tables) == 0 && migrationErrors == 0 {
 		log.Print("迁移解析没有产出任何表，无法校准")
 		return 1
 	}

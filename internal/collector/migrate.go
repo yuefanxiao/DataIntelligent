@@ -95,14 +95,21 @@ func applyStmt(st *Structure, stmt *pg_query.RawStmt, src, file string, findings
 			}
 		}
 	case *pg_query.Node_RenameStmt:
-		// 结构影响型 RENAME（表/列/约束）静默跳过 = 草稿与生产不一致；
-		// 索引/类型改名不影响结构中间态，跳过。
+		// 结构影响型 RENAME（表/列/约束/schema）静默跳过 = 草稿与
+		// 生产不一致；索引/类型改名不影响结构中间态，跳过。
 		switch n.RenameStmt.RenameType {
 		case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_COLUMN,
-			pg_query.ObjectType_OBJECT_TABCONSTRAINT:
+			pg_query.ObjectType_OBJECT_TABCONSTRAINT, pg_query.ObjectType_OBJECT_SCHEMA:
+			target := ""
+			if n.RenameStmt.Relation != nil {
+				target = n.RenameStmt.Relation.Relname
+			}
+			if n.RenameStmt.Newname != "" {
+				target = n.RenameStmt.Newname
+			}
 			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 				fmt.Sprintf("%s: %s 改名（%s）未处理（结构可能不完整，请人工确认）",
-					file, n.RenameStmt.RenameType.String(), n.RenameStmt.Relation.Relname)})
+					file, n.RenameStmt.RenameType.String(), target)})
 		}
 	}
 	// IndexStmt/CreateSchemaStmt/CreateExtensionStmt/CreateSeqStmt/
@@ -142,9 +149,15 @@ func applyCreateTable(st *Structure, cs *pg_query.CreateStmt, src string, beg, e
 			// 同库不同 schema 的重名表：语义模型 FQN（服务.库.表）
 			// 不含 schema，无法同时表达两张表——显式 warn 交人确认，
 			// 不静默覆盖（覆盖是确定性的，但必须被看见）。
-			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
-				fmt.Sprintf("表 %s 同时出现在 schema %q 与 %q——语义模型 FQN 不含 schema，无法同时表达，后者（%q）覆盖前者",
-					t.Name, prev.Schema, t.Schema, t.Schema)})
+			if cs.IfNotExists {
+				*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+					fmt.Sprintf("表 %s 同时出现在 schema %q 与 %q——语义模型 FQN 不含 schema，无法同时表达，保留先前定义（生产为两 schema 并存）",
+						t.Name, prev.Schema, t.Schema)})
+			} else {
+				*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+					fmt.Sprintf("表 %s 同时出现在 schema %q 与 %q——语义模型 FQN 不含 schema，无法同时表达，后者（%q）覆盖前者",
+						t.Name, prev.Schema, t.Schema, t.Schema)})
+			}
 		}
 		if cs.IfNotExists {
 			return
@@ -189,9 +202,10 @@ func applyColumnConstraint(t *Table, columnName string, cn *pg_query.Node, findi
 			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 				fmt.Sprintf("列 %s.%s 的外键未指定目标列（引用 %s 主键），on 条件留空待人工补", t.Name, columnName, c.Pktable.Relname)})
 		}
-		// PG 对内联匿名外键自动命名 <表>_<列>_fkey：按同名登记，
-		// 后续 DROP CONSTRAINT <自动名> 才能撤掉引用边。
-		auto := t.Name + "_" + columnName + "_fkey"
+		// PG 对内联匿名外键自动命名 <表>_<列>_fkey（截断到 63 字节，
+		// NAMEDATALEN-1）：按同名登记，后续 DROP CONSTRAINT <自动名>
+		// 才能撤掉引用边。
+		auto := truncateIdent(t.Name + "_" + columnName + "_fkey")
 		t.addConstraint(auto, constraintState{
 			kind:         "fk",
 			targetSchema: fkSchema(c.Pktable),
@@ -400,13 +414,63 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 }
 
 // benignAlterSubtype 是进不了 YAML 模型的非结构影响型 ALTER 子类型
-// （默认值/NOT NULL/约束校验——NOT NULL 不在模型里，validate 不改结构）。
+// （默认值/NOT NULL/统计/表级选项/触发器/行安全……——YAML 模型只承载
+// 表/列/类型/枚举/引用边，这些子类型不改变它们）。
+// 白名单按 pg_query 全枚举分类：遗漏会误报「结构可能不完整」，淹没
+// 真正结构性的未处理告警（继承/分区/typed table 等保留在 default 报警）。
 func benignAlterSubtype(t pg_query.AlterTableType) bool {
 	switch t {
-	case pg_query.AlterTableType_AT_ColumnDefault,
+	case pg_query.AlterTableType_AT_AddColumnToView,
+		pg_query.AlterTableType_AT_ColumnDefault,
+		pg_query.AlterTableType_AT_CookedColumnDefault,
 		pg_query.AlterTableType_AT_DropNotNull,
 		pg_query.AlterTableType_AT_SetNotNull,
-		pg_query.AlterTableType_AT_ValidateConstraint:
+		pg_query.AlterTableType_AT_SetExpression,
+		pg_query.AlterTableType_AT_DropExpression,
+		pg_query.AlterTableType_AT_CheckNotNull,
+		pg_query.AlterTableType_AT_SetStatistics,
+		pg_query.AlterTableType_AT_SetOptions,
+		pg_query.AlterTableType_AT_ResetOptions,
+		pg_query.AlterTableType_AT_SetStorage,
+		pg_query.AlterTableType_AT_SetCompression,
+		pg_query.AlterTableType_AT_AddIndex,
+		pg_query.AlterTableType_AT_ReAddIndex,
+		pg_query.AlterTableType_AT_ReAddConstraint,
+		pg_query.AlterTableType_AT_ReAddDomainConstraint,
+		pg_query.AlterTableType_AT_AlterConstraint, // 只改 deferrable，模型无此维度
+		pg_query.AlterTableType_AT_ValidateConstraint,
+		pg_query.AlterTableType_AT_AddIndexConstraint,
+		pg_query.AlterTableType_AT_ReAddComment,
+		pg_query.AlterTableType_AT_AlterColumnGenericOptions,
+		pg_query.AlterTableType_AT_ChangeOwner,
+		pg_query.AlterTableType_AT_ClusterOn,
+		pg_query.AlterTableType_AT_DropCluster,
+		pg_query.AlterTableType_AT_SetLogged,
+		pg_query.AlterTableType_AT_SetUnLogged,
+		pg_query.AlterTableType_AT_DropOids,
+		pg_query.AlterTableType_AT_SetAccessMethod,
+		pg_query.AlterTableType_AT_SetTableSpace,
+		pg_query.AlterTableType_AT_SetRelOptions,
+		pg_query.AlterTableType_AT_ResetRelOptions,
+		pg_query.AlterTableType_AT_ReplaceRelOptions,
+		pg_query.AlterTableType_AT_EnableTrig,
+		pg_query.AlterTableType_AT_EnableAlwaysTrig,
+		pg_query.AlterTableType_AT_EnableReplicaTrig,
+		pg_query.AlterTableType_AT_DisableTrig,
+		pg_query.AlterTableType_AT_EnableTrigAll,
+		pg_query.AlterTableType_AT_DisableTrigAll,
+		pg_query.AlterTableType_AT_EnableTrigUser,
+		pg_query.AlterTableType_AT_DisableTrigUser,
+		pg_query.AlterTableType_AT_EnableRule,
+		pg_query.AlterTableType_AT_EnableAlwaysRule,
+		pg_query.AlterTableType_AT_EnableReplicaRule,
+		pg_query.AlterTableType_AT_DisableRule,
+		pg_query.AlterTableType_AT_ReplicaIdentity,
+		pg_query.AlterTableType_AT_EnableRowSecurity,
+		pg_query.AlterTableType_AT_DisableRowSecurity,
+		pg_query.AlterTableType_AT_ForceRowSecurity,
+		pg_query.AlterTableType_AT_NoForceRowSecurity,
+		pg_query.AlterTableType_AT_GenericOptions:
 		return true
 	}
 	return false
@@ -615,4 +679,13 @@ func unwrapList(n *pg_query.Node) []*pg_query.Node {
 		return l.Items
 	}
 	return []*pg_query.Node{n}
+}
+
+// truncateIdent 按 PG 标识符长度上限（NAMEDATALEN-1 = 63 字节）截断，
+// 用于复现 PG 对自动命名约束名的截断行为。
+func truncateIdent(s string) string {
+	if len(s) <= 63 {
+		return s
+	}
+	return s[:63]
 }

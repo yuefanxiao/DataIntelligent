@@ -81,7 +81,8 @@ type constraintState struct {
 	pkCols       []string
 }
 
-// findTable 按名找表（s 为 "" 时忽略 schema 匹配——同库内表名唯一）。
+// findTable 按名找表（语义模型 FQN 不含 schema，解析路径沿用——
+// 同 schema 重名表在 applyCreateTable 已显式 warn）。
 func (s *Structure) findTable(name string) *Table {
 	for _, t := range s.Tables {
 		if t.Name == name {

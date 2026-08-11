@@ -195,3 +195,25 @@ func TestLoadManifestIdentValidation(t *testing.T) {
 		t.Errorf("合法清单应通过: %v", err)
 	}
 }
+
+// TestLoadManifestModelsDirValidation models_dir 拒绝绝对路径与 .. 逃逸。
+func TestLoadManifestModelsDirValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, md := range []string{"../../../../etc", "/etc", "a/../b"} {
+		p := write("m.yaml", "version: 1\nservices:\n  - name: ok\n    dir: svc\n    db: d\n    models_dir: "+md+"\n")
+		if _, err := LoadManifest(p); err == nil {
+			t.Errorf("models_dir %q 应被拒绝", md)
+		}
+	}
+	ok := write("ok.yaml", "version: 1\nservices:\n  - name: ok\n    dir: svc\n    db: d\n    models_dir: internal/data/invite\n")
+	if _, err := LoadManifest(ok); err != nil {
+		t.Errorf("合法 models_dir 应通过: %v", err)
+	}
+}

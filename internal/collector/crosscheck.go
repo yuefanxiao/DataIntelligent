@@ -37,6 +37,13 @@ func CrossCheck(st *Structure, models []gormModel) []Finding {
 				agg.Columns = append(agg.Columns, c)
 			}
 			if t, ok := m.Types[c]; ok {
+				if prev, dup := agg.Types[c]; dup && prev != t {
+					// 同表多模型对同一列声明冲突类型：静默吸收会削弱
+					// 类型 warn 方向——显式提示，交人确认。
+					findings = append(findings, Finding{SourceGORM, SeverityWarn,
+						fmt.Sprintf("模型 %s 与 %s 对列 %s.%s 声明不同 gorm 类型（%s vs %s），取后者参与比对",
+							agg.Struct, m.Struct, m.Table, c, prev, t)})
+				}
 				agg.Types[c] = t
 			}
 		}

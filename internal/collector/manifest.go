@@ -60,9 +60,13 @@ func LoadManifest(path string) (*Manifest, error) {
 		if !identRe.MatchString(s.DB) {
 			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的库名 %q 非法（只允许小写字母/数字/连字符/下划线，且不以连字符开头）", path, s.Name, s.DB)
 		}
-		// dir 是相对 repo root 的路径：拒绝绝对路径与 .. 逃逸。
+		// dir/models_dir 是相对 repo root/服务目录的路径：
+		// 拒绝绝对路径与 .. 逃逸（models_dir 缺省 internal/data）。
 		if filepath.IsAbs(s.Dir) || strings.Contains(s.Dir, "..") {
 			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的 dir %q 必须相对且不含 ..", path, s.Name, s.Dir)
+		}
+		if filepath.IsAbs(s.ModelsDir) || strings.Contains(s.ModelsDir, "..") {
+			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的 models_dir %q 必须相对且不含 ..", path, s.Name, s.ModelsDir)
 		}
 		if seen[s.Name] {
 			return nil, fmt.Errorf("采集清单 %s: 服务名重复 %q", path, s.Name)

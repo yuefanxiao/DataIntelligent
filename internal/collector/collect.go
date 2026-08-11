@@ -68,10 +68,13 @@ func Collect(cfg CollectConfig) (*CollectResult, error) {
 	if len(res.Services) == 0 {
 		return nil, fmt.Errorf("没有采集任何服务（清单为空或 --service %q 不在清单里）", cfg.Service)
 	}
-	// 协调残稿：services/ 里不在清单中的旧草稿（服务从清单移除后）
-	// 必须清掉——全量重建语义，避免陈旧服务混进门禁与同步管线。
-	if err := reconcileDrafts(cfg.OutDir, cfg.Manifest); err != nil {
-		return nil, err
+	// 协调残稿：全量扫描（--service 为空）时，services/ 里不在清单中
+	// 的旧草稿（服务从清单移除后）必须清掉——全量重建语义，避免陈旧
+	// 服务混进门禁与同步管线。增量扫描（--service）不动其他服务草稿。
+	if cfg.Service == "" {
+		if err := reconcileDrafts(cfg.OutDir, cfg.Manifest); err != nil {
+			return nil, err
+		}
 	}
 	// 第三道闸：采集产出必须过同步管线编译校验（可进同步管线）。
 	res.CompileErr = CheckCompile(cfg.OutDir)
@@ -103,6 +106,7 @@ func reconcileDrafts(outDir string, m *Manifest) error {
 		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
 			return fmt.Errorf("清理陈旧草稿 %s: %w", e.Name(), err)
 		}
+		fmt.Printf("dgw: 清理陈旧草稿 services/%s.yaml（不在采集清单中）\n", name)
 	}
 	return nil
 }

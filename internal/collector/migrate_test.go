@@ -308,3 +308,29 @@ func TestParseUnhandledAlterWarn(t *testing.T) {
 		t.Errorf("RENAME TABLE 应有 warn: %v", findings)
 	}
 }
+
+// TestParseSetRelOptionsBenign TimescaleDB 惯用 SET (timescaledb...)
+// 不误报「结构可能不完整」。
+func TestParseSetRelOptionsBenign(t *testing.T) {
+	ddl := `CREATE TABLE t (a bigint);
+	ALTER TABLE t SET (timescaledb.compress, timescaledb.compress_segmentby = 'a');`
+	_, findings := parseOne(t, ddl)
+	for _, f := range findings {
+		if strings.Contains(f.Message, "未处理") {
+			t.Errorf("SET RELOPTIONS 不应误报: %v", f)
+		}
+	}
+}
+
+// TestParseFkAutoNameTruncated 超长自动约束名按 63 字节截断
+// （与 PG NAMEDATALEN-1 一致），DROP CONSTRAINT 截断名可撤。
+func TestParseFkAutoNameTruncated(t *testing.T) {
+	longCol := strings.Repeat("very_long_column_name_", 5) // 超 63 字节
+	ddl := `CREATE TABLE u (id bigint);
+	CREATE TABLE t (` + longCol + ` bigint REFERENCES u(id));
+	ALTER TABLE t DROP CONSTRAINT ` + truncateIdent("t_"+longCol+"_fkey") + `;`
+	st, _ := parseOne(t, ddl)
+	if len(st.findTable("t").References) != 0 {
+		t.Error("按截断自动名 DROP CONSTRAINT 后引用边应被撤掉")
+	}
+}
