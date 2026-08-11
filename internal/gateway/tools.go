@@ -2,10 +2,13 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 )
 
@@ -72,36 +75,137 @@ func readOnly() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true}
 }
 
+// logged 包装类型化工具 handler：调用前后打执行记录（kind=tool_call，
+// spec §4.6 六工具全记）。执行记录失败不影响调用结果——记录是诊断设施，
+// 不阻断请求（ADR-0006「故障响应不依赖任何审计设施」，fail-open）。
+//
+// 记录内容：身份（ctx）/参数（input 原文，execute_sql 的 SQL 不脱敏）/
+// 状态与被拒原因（由结果或 gwerr 推导）/行数·truncated·plan_id（execute_sql
+// 结果元信息）/分阶段耗时（认证→权限→解析→执行→返回，handler 内打点 +
+// 本包装器的返回阶段）。
+func logged[In, Out any](g *Gateway, tool string, h mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
+		if g.execlog == nil {
+			return h(ctx, req, input)
+		}
+		timer := newStageTimer(ctx)
+		res, out, err := h(withStageTimer(ctx, timer), req, input)
+		retStart := time.Now()
+		rec := buildToolRecord(ctx, timer, tool, input, res, out, err)
+		timer.Add(execrecord.StageReturn, time.Since(retStart))
+		rec.StagesMS = timer.ms()
+		if lerr := g.execlog.LogToolCall(rec); lerr != nil {
+			g.logger.Error("执行记录写入失败（不阻断调用）", "tool", tool, "err", lerr)
+		}
+		return res, out, err
+	}
+}
+
+// buildToolRecord 组装工具调用的执行记录：状态由结果/错误推导（成功/拒绝/
+// 超时/解析失败），被拒原因 = gwerr 原文（如实）；execute_sql 成功结果附带
+// 行数/truncated/plan_id（结果元信息）。
+func buildToolRecord[In, Out any](ctx context.Context, timer *stageTimer, tool string, input In, res *mcp.CallToolResult, out Out, err error) execrecord.ToolCall {
+	user, _ := UserFromContext(ctx)
+	key, _ := KeyFromContext(ctx)
+	rec := execrecord.ToolCall{
+		TS:     time.Now(),
+		User:   user,
+		Key:    key,
+		Tool:   tool,
+		Params: input,
+	}
+	if err != nil {
+		// SDK 层错误返回（正常路径不可达——网关错误一律编码进结果；兜底
+		// 拒绝并如实落原因）。
+		rec.Status = execrecord.StatusRejected
+		rec.Reject = gwerr.Internal(err.Error())
+		return rec
+	}
+	if res != nil && res.IsError {
+		if ge, ok := rejectOf(res); ok && ge != nil {
+			rec.Reject = ge
+			rec.Status = statusOf(ge)
+		} else {
+			rec.Status = execrecord.StatusRejected
+		}
+		return rec
+	}
+	rec.Status = execrecord.StatusSuccess
+	if sr, ok := any(out).(*sqlResult); ok && sr != nil {
+		r, tr := sr.Meta.RowCount, sr.Meta.Truncated
+		rec.Rows, rec.Truncated = &r, &tr
+		rec.PlanID = sr.Meta.PlanID
+	}
+	return rec
+}
+
+// rejectOf 从错误结果里取 gwerr：优先 SetError 的底层错误（errResult 路径），
+// 兜底解析 content 的 gwerr JSON。返回 (原因, 是否错误结果)。
+func rejectOf(res *mcp.CallToolResult) (*gwerr.Error, bool) {
+	if res == nil || !res.IsError {
+		return nil, false
+	}
+	if e, ok := res.GetError().(*gwerr.Error); ok {
+		return e, true
+	}
+	if len(res.Content) > 0 {
+		if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+			var e gwerr.Error
+			if json.Unmarshal([]byte(tc.Text), &e) == nil && e.Kind != "" {
+				return &e, true
+			}
+		}
+	}
+	return nil, true
+}
+
+// statusOf 按 gwerr 推导执行记录状态（spec §4.6 状态契约）：
+//   - reason=timeout → 超时（statement_timeout，pg 57014 映射）
+//   - reason=syntax_error → 解析失败
+//   - 其余错误 → 拒绝（被拒原因如实落 reject 字段）
+func statusOf(e *gwerr.Error) string {
+	if e == nil {
+		return execrecord.StatusSuccess
+	}
+	if r, _ := e.Details["reason"].(string); r == "timeout" {
+		return execrecord.StatusTimeout
+	}
+	if r, _ := e.Details["reason"].(string); r == "syntax_error" {
+		return execrecord.StatusParseError
+	}
+	return execrecord.StatusRejected
+}
+
 func registerTools(s *mcp.Server, g *Gateway) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_entities",
 		Description: "双入口关键词检索：按业务概念或指标定位实体（关键词+向量 RRF 混合，≤20 条 + total）。",
 		Annotations: readOnly(),
-	}, stub[searchEntitiesInput]("search_entities"))
+	}, logged(g, "search_entities", stub[searchEntitiesInput]("search_entities")))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_entity",
 		Description: "FQN 精确查询单个实体：含枚举挂列、is_time、关系摘要。",
 		Annotations: readOnly(),
-	}, stub[getEntityInput]("get_entity"))
+	}, logged(g, "get_entity", stub[getEntityInput]("get_entity")))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "traverse_relations",
 		Description: "沿类型化关系边遍历（connects_to / contains / references / describes，双向、多跳），理解服务→库→表→列→指标→概念链路与可 join 关系。",
 		Annotations: readOnly(),
-	}, stub[traverseRelationsInput]("traverse_relations"))
+	}, logged(g, "traverse_relations", stub[traverseRelationsInput]("traverse_relations")))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_metric_definition",
 		Description: "读取指标口径（表达式 + 聚合 + 过滤，机器可读），可选带时间参数做 dry-run 展开（不执行）。",
 		Annotations: readOnly(),
-	}, stub[getMetricDefinitionInput]("get_metric_definition"))
+	}, logged(g, "get_metric_definition", stub[getMetricDefinitionInput]("get_metric_definition")))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_enum_values",
 		Description: "查询列的枚举取值（status 类字段的业务含义）。",
 		Annotations: readOnly(),
-	}, stub[listEnumValuesInput]("list_enum_values"))
+	}, logged(g, "list_enum_values", stub[listEnumValuesInput]("list_enum_values")))
 
 	// 并发闸数值动态注入（env 可配，Agent 侧描述与实际配置一致；
 	// New 保证 loadGate 恒非 nil）。
@@ -112,5 +216,5 @@ func registerTools(s *mcp.Server, g *Gateway) {
 			"执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。并发闸：每 key %d / 进程级 %d 同时查询，超限 rate_limited 快速拒绝（不排队）。",
 			perKey, processTotal),
 		Annotations: readOnly(),
-	}, g.handleExecuteSQL)
+	}, logged(g, "execute_sql", g.handleExecuteSQL))
 }

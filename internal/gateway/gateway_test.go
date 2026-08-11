@@ -39,7 +39,7 @@ func newTestGateway(t *testing.T) (*Gateway, *store.Store) {
 
 func createKey(t *testing.T, st *store.Store, userID string) string {
 	t.Helper()
-	key, err := credentials.Create(context.Background(), st.DB(), userID)
+	key, _, err := credentials.Create(context.Background(), st.DB(), userID)
 	if err != nil {
 		t.Fatalf("credentials.Create: %v", err)
 	}

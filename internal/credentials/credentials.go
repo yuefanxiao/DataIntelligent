@@ -42,19 +42,25 @@ func Hash(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Create 生成一把新 key，只把哈希写入 dgw_credentials 表，返回明文。
-// 调用方（CLI）负责「明文仅打印一次」：除本返回值外明文不出现在任何存储。
-func Create(ctx context.Context, db *sql.DB, userID string) (string, error) {
+// Create 生成一把新 key，只把哈希写入 dgw_credentials 表，返回明文与行 ID
+// （行 ID = 快照寻址/吊销句柄/执行记录 key 生命周期记录的标识）。调用方
+// （CLI）负责「明文仅打印一次」：除本返回值外明文不出现在任何存储。
+func Create(ctx context.Context, db *sql.DB, userID string) (string, int64, error) {
 	plain, err := Generate()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if _, err := db.ExecContext(ctx,
+	res, err := db.ExecContext(ctx,
 		"INSERT INTO dgw_credentials (key_hash, user_id) VALUES (?, ?)",
-		Hash(plain), userID); err != nil {
-		return "", fmt.Errorf("store key hash: %w", err)
+		Hash(plain), userID)
+	if err != nil {
+		return "", 0, fmt.Errorf("store key hash: %w", err)
 	}
-	return plain, nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return "", 0, fmt.Errorf("key 行 ID: %w", err)
+	}
+	return plain, id, nil
 }
 
 // VerifyKey 校验明文凭据：哈希比对命中且未吊销则返回该 key 的记录

@@ -12,6 +12,9 @@ func TestFromEnvDefaults(t *testing.T) {
 	t.Setenv(EnvPGTimeoutMS, "")
 	t.Setenv(EnvKeyConcurrency, "")
 	t.Setenv(EnvProcessConcurrency, "")
+	t.Setenv(EnvExecLogDir, "")
+	t.Setenv(EnvExecRawRetention, "")
+	t.Setenv(EnvExecSumRetention, "")
 
 	cfg := FromEnv()
 	if cfg.SQLLimit != 500 {
@@ -29,6 +32,14 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.DBPath != "./dgw.db" || cfg.HTTPAddr != ":8080" {
 		t.Errorf("DBPath/HTTPAddr 默认 = %q/%q", cfg.DBPath, cfg.HTTPAddr)
 	}
+	// 执行记录（06 票，spec §4.9）：原始 7 天轮转 + 聚合摘要 30 天
+	if cfg.ExecLogDir != "./logs" {
+		t.Errorf("ExecLogDir 默认 = %q，期望 ./logs", cfg.ExecLogDir)
+	}
+	if cfg.ExecRawRetentionDays != 7 || cfg.ExecSummaryRetentionDays != 30 {
+		t.Errorf("执行记录保留期默认 = %d/%d，期望 7/30",
+			cfg.ExecRawRetentionDays, cfg.ExecSummaryRetentionDays)
+	}
 }
 
 // §4.9 参数表各参数 env 可覆盖（数值型全表）。
@@ -37,6 +48,9 @@ func TestFromEnvOverrides(t *testing.T) {
 	t.Setenv(EnvPGTimeoutMS, "5000")
 	t.Setenv(EnvKeyConcurrency, "3")
 	t.Setenv(EnvProcessConcurrency, "12")
+	t.Setenv(EnvExecLogDir, "/var/log/dgw")
+	t.Setenv(EnvExecRawRetention, "14")
+	t.Setenv(EnvExecSumRetention, "60")
 
 	cfg := FromEnv()
 	if cfg.SQLLimit != 1000 {
@@ -50,6 +64,13 @@ func TestFromEnvOverrides(t *testing.T) {
 	}
 	if cfg.ProcessConcurrency != 12 {
 		t.Errorf("ProcessConcurrency = %d，期望 12", cfg.ProcessConcurrency)
+	}
+	if cfg.ExecLogDir != "/var/log/dgw" {
+		t.Errorf("ExecLogDir = %q，期望 /var/log/dgw", cfg.ExecLogDir)
+	}
+	if cfg.ExecRawRetentionDays != 14 || cfg.ExecSummaryRetentionDays != 60 {
+		t.Errorf("执行记录保留期 = %d/%d，期望 14/60",
+			cfg.ExecRawRetentionDays, cfg.ExecSummaryRetentionDays)
 	}
 }
 

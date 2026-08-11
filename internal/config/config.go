@@ -9,25 +9,31 @@ import (
 
 // Env 变量名（`DGW_` 前缀与凭据前缀同源，标识网关域）。
 const (
-	EnvDBPath             = "DGW_DB_PATH"                 // SQLite 运行时存储路径
-	EnvHTTPAddr           = "DGW_HTTP_ADDR"               // Streamable HTTP 监听地址
-	EnvAPIKey             = "DGW_API_KEY"                 // stdio 调试形态的凭据（env 传入）
-	EnvPGDatabases        = "DGW_PG_DATABASES"            // execute_sql 路由表（JSON 数组 [{dbname, service, dsn}]，DSN 即凭证）
-	EnvSQLLimit           = "DGW_SQL_LIMIT"               // 行数上限（默认 500，范围 500-5000，越界启动失败）
-	EnvPGTimeoutMS        = "DGW_PG_STATEMENT_TIMEOUT_MS" // statement_timeout 毫秒（默认 30000）
-	EnvOpenAIKey          = "DGW_OPENAI_API_KEY"          // semantic-sync 的 embedding 生成（缺省跳过，失败降级不阻塞）
-	EnvEmbeddingModel     = "DGW_EMBEDDING_MODEL"         // embedding 模型（缺省 text-embedding-3-small；spec §4.9「env 可覆盖」）
-	EnvKeyConcurrency     = "DGW_KEY_CONCURRENCY"         // 每 key 并发查询上限（默认 2，spec §4.9）
-	EnvProcessConcurrency = "DGW_PROCESS_CONCURRENCY"     // 进程级总并发上限（默认 8，spec §4.9）
+	EnvDBPath             = "DGW_DB_PATH"                     // SQLite 运行时存储路径
+	EnvHTTPAddr           = "DGW_HTTP_ADDR"                   // Streamable HTTP 监听地址
+	EnvAPIKey             = "DGW_API_KEY"                     // stdio 调试形态的凭据（env 传入）
+	EnvPGDatabases        = "DGW_PG_DATABASES"                // execute_sql 路由表（JSON 数组 [{dbname, service, dsn}]，DSN 即凭证）
+	EnvSQLLimit           = "DGW_SQL_LIMIT"                   // 行数上限（默认 500，范围 500-5000，越界启动失败）
+	EnvPGTimeoutMS        = "DGW_PG_STATEMENT_TIMEOUT_MS"     // statement_timeout 毫秒（默认 30000）
+	EnvOpenAIKey          = "DGW_OPENAI_API_KEY"              // semantic-sync 的 embedding 生成（缺省跳过，失败降级不阻塞）
+	EnvEmbeddingModel     = "DGW_EMBEDDING_MODEL"             // embedding 模型（缺省 text-embedding-3-small；spec §4.9「env 可覆盖」）
+	EnvKeyConcurrency     = "DGW_KEY_CONCURRENCY"             // 每 key 并发查询上限（默认 2，spec §4.9）
+	EnvProcessConcurrency = "DGW_PROCESS_CONCURRENCY"         // 进程级总并发上限（默认 8，spec §4.9）
+	EnvExecLogDir         = "DGW_EXEC_LOG_DIR"                // 执行记录目录（原始 JSONL + 聚合摘要，ADR-0009 /logs）
+	EnvExecRawRetention   = "DGW_EXEC_RAW_RETENTION_DAYS"     // 执行记录原始保留天数（默认 7，spec §4.9）
+	EnvExecSumRetention   = "DGW_EXEC_SUMMARY_RETENTION_DAYS" // 聚合摘要保留天数（默认 30，spec §4.9）
 )
 
-// §4.9 参数表默认值（env 可覆盖；网关/测试共用的单一事实源——
-// cmd/dgw 与 gateway 包都从这里取，避免字面量漂移）。
+// §4.9 参数表默认值（env 可覆盖；cmd/dgw 与 gateway 包都从这里取，
+// 避免字面量漂移）。
 const (
-	DefaultSQLLimit           = 500
-	DefaultPGTimeoutMS        = 30000
-	DefaultKeyConcurrency     = 2
-	DefaultProcessConcurrency = 8
+	DefaultSQLLimit                 = 500
+	DefaultPGTimeoutMS              = 30000
+	DefaultKeyConcurrency           = 2
+	DefaultProcessConcurrency       = 8
+	DefaultExecLogDir               = "./logs"
+	DefaultExecRawRetentionDays     = 7
+	DefaultExecSummaryRetentionDays = 30
 )
 
 // Config 是一次进程启动的配置快照。
@@ -48,19 +54,28 @@ type Config struct {
 	KeyConcurrency int
 	// ProcessConcurrency 是进程级总并发上限（spec §4.9 默认 8）。
 	ProcessConcurrency int
+	// ExecLogDir 是执行记录目录（原始 JSONL + 聚合摘要；ADR-0009 /logs）。
+	ExecLogDir string
+	// ExecRawRetentionDays 是原始记录保留天数（spec §4.9 默认 7）。
+	ExecRawRetentionDays int
+	// ExecSummaryRetentionDays 是聚合摘要保留天数（spec §4.9 默认 30）。
+	ExecSummaryRetentionDays int
 }
 
 // FromEnv 从环境变量构造配置，未设置项取默认值。
 func FromEnv() Config {
 	return Config{
-		DBPath:             getenv(EnvDBPath, "./dgw.db"),
-		HTTPAddr:           getenv(EnvHTTPAddr, ":8080"),
-		APIKey:             os.Getenv(EnvAPIKey),
-		PGDatabases:        os.Getenv(EnvPGDatabases),
-		SQLLimit:           getenvInt(EnvSQLLimit, DefaultSQLLimit),
-		PGTimeoutMS:        getenvInt(EnvPGTimeoutMS, DefaultPGTimeoutMS),
-		KeyConcurrency:     getenvInt(EnvKeyConcurrency, DefaultKeyConcurrency),
-		ProcessConcurrency: getenvInt(EnvProcessConcurrency, DefaultProcessConcurrency),
+		DBPath:                   getenv(EnvDBPath, "./dgw.db"),
+		HTTPAddr:                 getenv(EnvHTTPAddr, ":8080"),
+		APIKey:                   os.Getenv(EnvAPIKey),
+		PGDatabases:              os.Getenv(EnvPGDatabases),
+		SQLLimit:                 getenvInt(EnvSQLLimit, DefaultSQLLimit),
+		PGTimeoutMS:              getenvInt(EnvPGTimeoutMS, DefaultPGTimeoutMS),
+		KeyConcurrency:           getenvInt(EnvKeyConcurrency, DefaultKeyConcurrency),
+		ProcessConcurrency:       getenvInt(EnvProcessConcurrency, DefaultProcessConcurrency),
+		ExecLogDir:               getenv(EnvExecLogDir, DefaultExecLogDir),
+		ExecRawRetentionDays:     getenvInt(EnvExecRawRetention, DefaultExecRawRetentionDays),
+		ExecSummaryRetentionDays: getenvInt(EnvExecSumRetention, DefaultExecSummaryRetentionDays),
 	}
 }
 

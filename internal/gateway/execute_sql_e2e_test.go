@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
@@ -162,6 +163,20 @@ func e2eGateway(t *testing.T, entries []db.Entry, limit int, timeout time.Durati
 // e2eGatewayWith 是 e2eGateway 的闸数值注入形态（并发闸测试用短配额）。
 func e2eGatewayWith(t *testing.T, entries []db.Entry, limit int, timeout time.Duration, gatePerKey, gateTotal int, grants_ ...string) (*Gateway, *store.Store) {
 	t.Helper()
+	return e2eGatewayOpts(t, "", entries, limit, timeout, gatePerKey, gateTotal, grants_...)
+}
+
+// e2eGatewayLogged 是带执行记录的 e2e 网关（06 票：JSONL 落盘目录注入，
+// 原始 7 天 / 摘要 30 天取 spec 默认）。
+func e2eGatewayLogged(t *testing.T, logDir string, entries []db.Entry, limit int, timeout time.Duration, grants_ ...string) (*Gateway, *store.Store) {
+	t.Helper()
+	return e2eGatewayOpts(t, logDir, entries, limit, timeout, 2, 8, grants_...)
+}
+
+// e2eGatewayOpts 是 e2e 网关组装的公共路径：logDir 非空时注入执行记录
+// （06 票）；其余参数同 e2eGatewayWith。
+func e2eGatewayOpts(t *testing.T, logDir string, entries []db.Entry, limit int, timeout time.Duration, gatePerKey, gateTotal int, grants_ ...string) (*Gateway, *store.Store) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "dgw.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -172,7 +187,16 @@ func e2eGatewayWith(t *testing.T, entries []db.Entry, limit int, timeout time.Du
 		t.Fatalf("db.NewRouter: %v", err)
 	}
 	t.Cleanup(router.Close)
-	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExecuteSQL(router, limit), WithLoadGate(gatePerKey, gateTotal))
+	opts := []Option{WithExecuteSQL(router, limit), WithLoadGate(gatePerKey, gateTotal)}
+	if logDir != "" {
+		lg, err := execrecord.New(execrecord.Config{Dir: logDir, RawRetentionDays: 7, SummaryRetentionDays: 30})
+		if err != nil {
+			t.Fatalf("execrecord.New: %v", err)
+		}
+		t.Cleanup(func() { lg.Close() })
+		opts = append(opts, WithExecLog(lg))
+	}
+	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), opts...)
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}

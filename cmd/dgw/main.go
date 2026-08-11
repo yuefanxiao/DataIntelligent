@@ -32,6 +32,7 @@ import (
 	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/credentials"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/gateway"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/semantic"
@@ -104,6 +105,9 @@ env（flag 优先）：
   DGW_PG_STATEMENT_TIMEOUT_MS  statement_timeout 毫秒（默认 30000）
   DGW_KEY_CONCURRENCY     每 key 并发查询上限（默认 2，超限结构化拒绝不排队）
   DGW_PROCESS_CONCURRENCY 进程级总并发上限（默认 8，守护进程语义；stdio 退化为每进程闸）
+  DGW_EXEC_LOG_DIR                执行记录目录（默认 ./logs；原始 JSONL + 聚合摘要）
+  DGW_EXEC_RAW_RETENTION_DAYS     执行记录原始保留天数（默认 7，spec §4.9）
+  DGW_EXEC_SUMMARY_RETENTION_DAYS 聚合摘要保留天数（默认 30，spec §4.9）
 `)
 }
 
@@ -133,22 +137,43 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 	return db.NewRouter(context.Background(), entries, time.Duration(cfg.PGTimeoutMS)*time.Millisecond)
 }
 
-// gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸）。
+// gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸 +
+// 执行记录）。
 // 并发闸恒注入：即使未配置 PG 路由，env 数值也经 WithLoadGate 校验
-// （越界配置同样启动失败，不会静默退化为默认 2/8）。
+// （越界配置同样启动失败，不会静默退化为默认 2/8）。执行记录恒注入：
+// 目录不可写 = 启动失败（execLog fail fast），不存在「带病不记录」形态。
+// cleanup 关闭执行记录器与 PG 路由（路由未配置时只关记录器）。
 func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
+	lg := execLog(cfg)
 	opts := []gateway.Option{
 		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
+		gateway.WithExecLog(lg),
 	}
 	router, err := buildRouter(cfg)
 	if err != nil {
+		_ = lg.Close()
 		return nil, nil, err
 	}
 	if router == nil {
-		return opts, func() {}, nil
+		return opts, func() { _ = lg.Close() }, nil
 	}
 	opts = append(opts, gateway.WithExecuteSQL(router, cfg.SQLLimit))
-	return opts, router.Close, nil
+	return opts, func() { router.Close(); _ = lg.Close() }, nil
+}
+
+// execLog 打开执行记录写入器（06 票；spec §4.9 参数表：原始 7 天轮转 +
+// 聚合摘要 30 天，env 可覆盖；ADR-0009 部署 volume /logs）。目录不可建/
+// 保留期非法 = 启动失败（配置错误 fail fast）。
+func execLog(cfg config.Config) *execrecord.Logger {
+	l, err := execrecord.New(execrecord.Config{
+		Dir:                  cfg.ExecLogDir,
+		RawRetentionDays:     cfg.ExecRawRetentionDays,
+		SummaryRetentionDays: cfg.ExecSummaryRetentionDays,
+	})
+	if err != nil {
+		log.Fatalf("执行记录初始化失败: %v", err)
+	}
+	return l
 }
 
 func cmdServe() {
@@ -216,12 +241,21 @@ func cmdKeyCreate() {
 	if *user == "" {
 		log.Fatal("key-create 需要 --user（绑定用户身份）")
 	}
+	cfg := config.FromEnv()
 	st := openStore(*dbPath)
 	defer st.Close()
 
-	plain, err := credentials.Create(context.Background(), st.DB(), *user)
+	plain, id, err := credentials.Create(context.Background(), st.DB(), *user)
 	if err != nil {
 		log.Fatalf("创建凭据失败: %v", err)
+	}
+	// key 生命周期执行记录（06 票：CLI 侧一行；记录失败不影响命令结果）。
+	lg := execLog(cfg)
+	defer lg.Close()
+	if err := lg.LogKeyLifecycle(execrecord.KeyLifecycle{
+		TS: time.Now(), Event: execrecord.EventKeyCreated, User: *user, Key: strconv.FormatInt(id, 10),
+	}); err != nil {
+		log.Printf("执行记录写入失败: %v", err)
 	}
 	// 明文仅此一次打印；哈希已落库，此后任何地方不再持有明文。
 	fmt.Printf("dgw: 新凭据（用户 %s）——明文仅打印一次，请立即保存：\n%s\n", *user, plain)
@@ -240,6 +274,7 @@ func cmdKeyRevoke() {
 	if err != nil {
 		log.Fatalf("key ID 应为数字: %q", *id)
 	}
+	cfg := config.FromEnv()
 	st := openStore(*dbPath)
 	defer st.Close()
 
@@ -248,10 +283,34 @@ func cmdKeyRevoke() {
 		log.Fatalf("吊销凭据失败: %v", err)
 	}
 	if revoked {
+		// key 生命周期执行记录（06 票：CLI 侧一行；吊销成功才记——幂等
+		// 无操作不伪造事件；被吊销 key 的属主从快照取）。
+		lg := execLog(cfg)
+		defer lg.Close()
+		if err := lg.LogKeyLifecycle(execrecord.KeyLifecycle{
+			TS: time.Now(), Event: execrecord.EventKeyRevoked,
+			User: keyOwner(context.Background(), st, idNum), Key: *id,
+		}); err != nil {
+			log.Printf("执行记录写入失败: %v", err)
+		}
 		fmt.Printf("dgw: 已吊销 key #%d（即时生效）\n", idNum)
 	} else {
 		fmt.Printf("dgw: key #%d 不存在或已吊销（幂等，无操作）\n", idNum)
 	}
+}
+
+// keyOwner 查一把 key 的绑定用户（吊销记录的属主字段；key 不存在返回空串）。
+func keyOwner(ctx context.Context, st *store.Store, id int64) string {
+	keys, err := credentials.List(ctx, st.DB())
+	if err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		if k.ID == id {
+			return k.UserID
+		}
+	}
+	return ""
 }
 
 // grantCmd 解析 grant-add / grant-remove 的公共 flag。
