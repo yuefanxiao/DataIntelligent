@@ -70,16 +70,21 @@ if git -C "$WORK" status --short | grep -q "services/bss-wallet.yaml"; then
 else
   [ -f "$WORK/services/bss-wallet.yaml" ] || { echo "FAIL: 采集草稿未落 clone 的 services/"; exit 1; }
   echo "    采集幂等收敛（结构一致，语义保留合并后无 diff）"
+  # 幂等收敛下仍验证「语义回写 → commit → revert 回滚」链路：追加一处
+  # 服务描述确认标记（模拟服务负责人确认回写，US-15/16），走完整版本机制。
+  printf '\n# verify: 语义回写确认标记（US-15/16）\n' >> "$WORK/services/bss-wallet.yaml"
+  grep -q "语义回写确认标记" "$WORK/services/bss-wallet.yaml" || { echo "FAIL: 语义回写标记未写入"; exit 1; }
 fi
 
 echo "==> [3/5] 版本机制：commit + push（review = Gitea PR 承载）"
 if git -C "$WORK" status --short | grep -q "services/bss-wallet.yaml"; then
   git -C "$WORK" add services/bss-wallet.yaml
-  git -C "$WORK" commit -q -m "collect: bss-wallet 结构草稿（人工 review 后合入）"
+  git -C "$WORK" commit -q -m "collect: bss-wallet 语义回写确认（人工 review 后合入）"
   git -C "$WORK" push -q origin HEAD
   echo "    committed + pushed（HEAD = $(git -C "$WORK" rev-parse --short HEAD)）"
 else
-  echo "    无变更，跳过 commit/push（幂等收敛）"
+  echo "FAIL: 采集后 services/bss-wallet.yaml 应存在变更（结构漂移或语义回写标记）"
+  exit 1
 fi
 
 echo "==> [4/5] 同步管线：dry-run diff + 应用（对 clone 操作）"
@@ -89,17 +94,13 @@ go run ./cmd/dgw semantic-sync --dir "$WORK" --db "$STORE" \
   | grep -q "语义同步完成" || { echo "FAIL: 同步应用"; exit 1; }
 echo "    同步完成（作者入口 → 运行时 SQLite）"
 
-echo "==> [5/5] revert 即回滚：revert 采集提交 → 重跑同步（墓碑传播删除）"
-if git -C "$WORK" log --oneline | grep -q "collect: bss-wallet"; then
-  REVERT_TARGET="$(git -C "$WORK" rev-parse HEAD)"
-  git -C "$WORK" revert --no-edit "$REVERT_TARGET" >/dev/null
-  git -C "$WORK" push -q origin HEAD
-  go run ./cmd/dgw semantic-sync --dir "$WORK" --db "$STORE" \
-    | grep -q "语义同步完成" || { echo "FAIL: revert 后重同步"; exit 1; }
-  echo "    revert 完成（commit 即版本，revert + 重跑管线即回滚，ADR-0002）"
-else
-  echo "    无采集提交可回滚（幂等收敛场景），跳过 revert 验证"
-fi
+echo "==> [5/5] revert 即回滚：revert 采集/回写提交 → 重跑同步（commit 即版本）"
+REVERT_TARGET="$(git -C "$WORK" rev-parse HEAD)"
+git -C "$WORK" revert --no-edit "$REVERT_TARGET" >/dev/null
+git -C "$WORK" push -q origin HEAD
+go run ./cmd/dgw semantic-sync --dir "$WORK" --db "$STORE" \
+  | grep -q "语义同步完成" || { echo "FAIL: revert 后重同步"; exit 1; }
+echo "    revert 完成（commit 即版本，revert + 重跑管线即回滚，ADR-0002）"
 
 rm -rf "$REMOTE" "$WORK" "$STORE" "$STORE-wal" "$STORE-shm"
 echo

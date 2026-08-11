@@ -24,4 +24,5 @@ v1 知识采集 = **混合分工**：结构知识（表/列/类型/主外键/CHE
 - 与 03 新表告警合流：采集 diff 发现新表 → 变更建议 → 确认入 YAML → 授权重展开告警（新表默认拒绝不变）。
 - 04 执行记录信号（被拒查询/原料路径/搜索关键词）是语义补全与漂移报告的输入；drift 报告同时是「无描述表/列」的产出面。
 - 环境事实修正（neo-cloud 探查）：13 个 Go 服务（Kratos v2.9）、10 个持库、**每服务一库**（同一 CNPG 集群、一主两从）、golang-migrate v4.19.1 统一、GORM v1.31.1（生产无 AutoMigrate）、枚举=CHECK 约束（无 CREATE TYPE）、COMMENT ON 极少（仅 subscription 一服务）、TimescaleDB（iam-audit/bill）；docker-compose 开发布局（单库）与生产不一致——采集器解析生产形态（每服务一库/schema 前缀），不以 compose 为准。假设：neo-cloud 即全部生产服务源，若非，采集源扩展为多仓库。
+- 补记（issue #30 实施）：采集重跑 = 结构更新 + **语义保留合并**（`WriteDraft` 覆盖写前按 FQN 把已确认的 description/is_time/枚举 label 带回新草稿，结构永远以新采集为准）——「纯结构变更批量确认负担≈零」成立的前提，否则每次增量采集都会抹掉人工语义；无持库服务（纯编排/聚合/事件采集，清单不配 db）只产出服务实体草稿，语义层覆盖全部后端服务。
 - 输出：11（校准凭证位置/采集器部署）、12（golden test 语料、drift 例行、Gitea 触发排期）；ADR-0002/0005 的同步管线决策原样有效，本 ADR 不修正。

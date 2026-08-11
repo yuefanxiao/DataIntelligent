@@ -106,11 +106,17 @@ func RenderDraft(st *Structure) ([]byte, error) {
 		// 草稿没有库层，编译为「服务 →（无子实体）」。
 		f.Databases = []draftDB{db}
 	}
+	return encodeDraft(f)
+}
+
+// encodeDraft 按草稿统一格式渲染（2 空格缩进，yaml.v3 编码器；
+// RenderDraft 与 MergeSemantics 共用，保证输出风格一致）。
+func encodeDraft(f draftFile) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(f); err != nil {
-		return nil, fmt.Errorf("渲染服务 %s 草稿: %w", st.Service, err)
+		return nil, fmt.Errorf("渲染服务 %s 草稿: %w", f.Service, err)
 	}
 	if err := enc.Close(); err != nil {
 		return nil, err
@@ -167,16 +173,7 @@ func MergeSemantics(newDraft, existing []byte) ([]byte, error) {
 			}
 		}
 	}
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(cur); err != nil {
-		return nil, fmt.Errorf("渲染合并草稿 %s: %w", cur.Service, err)
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return encodeDraft(cur)
 }
 
 func findDraftDB(f draftFile, name string) *draftDB {

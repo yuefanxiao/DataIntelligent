@@ -123,9 +123,11 @@ func cmdScan() int {
 		db := sr.DB
 		if db == "" {
 			db = "-（无持库）"
+		} else {
+			db += schemaSuffix(sr.Schema)
 		}
-		fmt.Printf("dgw: 采集 %s（库 %s%s）：%d 表 / %d 列 / %d 枚举 / %d 引用\n",
-			sr.Name, db, schemaSuffix(sr.Schema), sr.Tables, sr.Columns, sr.Enums, sr.Refs)
+		fmt.Printf("dgw: 采集 %s（库 %s）：%d 表 / %d 列 / %d 枚举 / %d 引用\n",
+			sr.Name, db, sr.Tables, sr.Columns, sr.Enums, sr.Refs)
 		n := sr.PrintFindings()
 		gateErrors += n
 	}
