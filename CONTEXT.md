@@ -64,8 +64,16 @@ _Avoid_: ETL（那是业务数据的搬运）
 _Avoid_: 检索接口（模糊，工具协议属票据 02 的范围）
 
 **查询规划 Query Plan**:
-把业务诉求翻译成可执行只读 SQL 的过程（语义解析→匹配本体→展开指标→生成 SQL→校验）。v1 工具面不含规划工具——指标路径由 get_metric_definition 的 dry-run 展开覆盖（确定性编译），自由诉求规划归票据 10 决策；执行侧仅留 plan_id 溯源口子。
-_Avoid_: v1 工具（create_query_plan 是网关侧规划的形态，10 决议前不实现）
+把业务诉求翻译成可执行只读 SQL 的过程（语义解析→匹配本体→展开指标→生成 SQL→校验）。v1 工具面不含规划工具——指标路径由 get_metric_definition 的 dry-run 展开覆盖（确定性编译），自由诉求 v1 = 消费方 Agent 侧规划（02 方案甲）；网关侧规划（create_query_plan）的生成引擎选型延后（10 已定，12 排期时定）；执行侧仅留 plan_id 溯源口子。
+_Avoid_: v1 工具（create_query_plan 是网关侧规划的形态，引擎选型 10 已延后，v2 前不实现）
+
+**校验层 Validation Layer**:
+execute_sql 的强制安全管线——AST 分类（wasilibs/go-pgquery，cgo-free，非 SELECT 类一律拒绝）→ 表提取 + 授权（AST 为唯一授权通道，对表 FQN 白名单比对，未知/未授权表拒绝）→ PG 物理边界（共享只读角色 + statement_timeout + 禁 SET ROLE）→ LIMIT 包层执行（限额 N = 500/5000）；校验失败 = 结构化错误回传调用方，网关不重试、无自愈循环。EXPLAIN 预检留 v2 规划流程。
+_Avoid_: SQL 校验（暗示只查语法；校验层是分类+授权+物理边界+限额的四段链）
+
+**负载防护 Load Protection**:
+网关并发闸——每 key 并发查询上限 + 进程级总并发上限，超出 → 结构化错误拒绝（不排队），审计记「被拒原因=限流」；statement_timeout 默认收紧（可配）。数值归 12 定。
+_Avoid_: 限流（限流挡请求频率；并发闸挡「大量长查询」的速率攻击）
 
 **Agent Skill**:
 随网关交付的轻量使用指南（≤1 页）：工具清单与用途、标准工作流（发现→解析→执行）、回退路径（超限/无权限/无指标走表·列原料路径）；教 Coding Agent 何时用哪个工具。v1 交付物之一。

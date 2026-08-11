@@ -32,6 +32,7 @@
 
 - [04 审计设计：记录内容、存储与保留期](https://github.com/yuefanxiao/DataIntelligent/issues/5) — 「审计」重构为**执行记录**：六工具全记 + 认证失败/拒绝 + key 生命周期（CLI 一行）的结构化 JSONL 日志（宿主机文件 + 轮转），字段契约 = 时间/用户/key/工具/参数（SQL 原文入库不脱敏，宿主机权限即访问边界）/分阶段耗时/状态/行数/truncated/plan_id/被拒原因；原始 ~7 天 + 聚合摘要 ~30 天；不做 SQLite 证据存储、不做 CLI 查询面、不接 OTel（安全证据仅合规政策驱动时按契约升级）；驱动 = 排障（statement_timeout 自愈 + psql 手动杀 + 日志事后查）+ tracing + 优化数据源（08 的信号：被拒查询/原料路径/搜索关键词）。解封 12；输出 08（字段契约）、10（超时/截断分布）、11（日志位置）；ADR-0006 修正 ADR-0005 的审计输入。
 - [08 知识采集与保鲜：自动 vs 人工、增量更新](https://github.com/yuefanxiao/DataIntelligent/issues/9) — 混合分工：结构自动（migration 文件为主干 + GORM 交叉验证 + 按需 calibrate 生产校准）、语义人工（Agent 起草+审查、人工确认）；采集器 = Go CLI（与同步管线同仓、真实语料 golden test）+ 采集工作流 Skill；增量 v1 手动 on-demand、Gitea label 触发后置；变更准入 = diff 建议 + PR review（纯结构批量确认）；校验三层 = 编译期 + dry-run + 漂移报告（手动+每周、只报告不改）；回滚 = 独立语义仓库（内部 Gitea）+ revert + 全量重建；API 定义采集 v1 排除。事实确认：golang-migrate v4.19.1 + GORM（生产无 AutoMigrate）、每服务一库。输出 11（校准凭证）、12（golden 语料/drift 例行/Gitea 排期）；ADR-0007。
+- [10 SQL 生成路线决策：Wren 自托管 vs 自研 vs LLM+校验](https://github.com/yuefanxiao/DataIntelligent/issues/11) — v1 路线 = 02 方案甲（Agent 侧规划）+ 05 指标确定性编译 + **网关确定性校验层**（execute_sql 内部强制管线：wasilibs/go-pgquery cgo-free AST 分类（非 SELECT 一律拒）→ AST 为唯一授权通道比对 03 表 FQN 白名单 → PG 共享只读角色/超时物理边界 → `SELECT * FROM (<sql>) _q LIMIT N` 限额包层）；失败=结构化错误回传调用方、网关无自愈循环；并发闸（每 key+进程级，超限结构化拒绝）+ statement_timeout 收紧，数值归 12；数据行流向消费方 Agent=产品设计，网关第三方出口仅元数据 embedding（07）；**Wren 自托管出局**（2026 事实：经典栈冻结 legacy/v1 不修安全、新 OSS 无 Go 绑定/无 HTTP API、RLS/审计=商业版）；不自研完整 compiler（自由诉求需 LLM 在前端、规划器级工程量）；v2 create_query_plan 引擎选型延后（12 排期时定，02 草案接口冻结、plan_id 已预留、引擎可插拔）。输出 03（校验层=授权物理实现）、12（落地/数值/排期）；ADR-0008。
 
 ## Not yet specified
 
@@ -43,6 +44,8 @@
 - API 定义采集（protobuf/OpenAPI）——08 已定 v1 排除，v2 候选
 - neo-cloud 之外的服务仓库（若生产服务不止于此）——采集源扩展，08 按「neo-cloud 即全部」假设记录
 - 网关自身的高可用 / 监控 / 告警需求
+- v2 网关侧规划引擎选型（create_query_plan：外部 LLM API vs 私有化模型 vs 不做网关侧规划）与诉求/元数据出机房边界——10 已定延后，12 排期时定
+- 负载防护参数（每 key/进程级并发上限、statement_timeout 默认值）——10 已定机制，数值归 12 定
 
 ## Out of scope
 
@@ -52,6 +55,7 @@
 - 独立 Agent 产品（工具层先行，Q6b）
 - 跨会话记忆与自进化（长期愿景，目的地重画时再议）
 - 数仓 / OLAP 分析
+
 
 
 
