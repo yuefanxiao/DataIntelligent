@@ -27,3 +27,24 @@ DGW_API_KEY=<上面打印的 key> dgw serve-stdio
 ```
 
 配置面 = env（`DGW_DB_PATH` / `DGW_HTTP_ADDR` / `DGW_API_KEY`），flag 可覆盖。
+
+## 采集器（`dgw-collect`）
+
+结构知识自动采集 CLI（ADR-0007）：解析服务仓库 migration 文件（golang-migrate
+纯 SQL，生产形态每服务一库/schema 前缀）→ 语义作者入口 YAML 草稿，GORM
+模型交叉验证为第二道闸，`calibrate` 子命令按需连只读从库做生产校准（漂移
+报告，只报告不改）。触发 = 手动 on-demand；草稿经人工 review 入语义仓库后
+由 `dgw semantic-sync` 进运行时。
+
+```sh
+go build ./cmd/dgw-collect
+
+# 采集 neo-cloud 全部持库服务 → 结构 YAML 草稿（清单映射生产库名）
+dgw-collect scan --repo ~/cloud/neo-cloud \
+  --manifest samples/collector/manifest.yaml --out /tmp/collect-out
+
+# 按需校准：草稿 vs 生产从库对照（information_schema，只报告不改）
+dgw-collect calibrate --repo ~/cloud/neo-cloud \
+  --manifest samples/collector/manifest.yaml --service bss-wallet \
+  --dsn postgres://readonly:xxx@replica-host:5432/wallet
+```

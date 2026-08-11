@@ -1,0 +1,12 @@
+# golden test 用的采集清单（testdata/neo-cloud 语料，3 个代表服务）。
+version: 1
+services:
+  - name: bss-wallet
+    dir: bss/bss-wallet-service
+    db: wallet
+  - name: bss-subscription
+    dir: bss/bss-subscription-service
+    db: subscription
+  - name: iam
+    dir: iam/iam-service
+    db: iam

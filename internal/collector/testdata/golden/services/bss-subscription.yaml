@@ -1,0 +1,340 @@
+version: 1
+service: bss-subscription
+databases:
+  - name: subscription
+    tables:
+      - name: model_catalog_heads
+        schema: subscription
+        columns:
+          - name: model_id
+            type: varchar(191)
+          - name: catalog_sequence
+            type: bigint
+          - name: current_model_product_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: model_catalog_outbox
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: event_id
+            type: varchar(64)
+          - name: model_id
+            type: varchar(191)
+          - name: model_product_id
+            type: varchar(64)
+          - name: product_revision
+            type: bigint
+          - name: catalog_sequence
+            type: bigint
+          - name: event_type
+            type: varchar(32)
+            enum_values:
+              - value: created
+              - value: delist_set
+              - value: due_delisted
+              - value: updated
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: dead
+              - value: pending
+              - value: processed
+              - value: processing
+          - name: attempt_count
+            type: integer
+          - name: available_at
+            type: timestamptz
+          - name: claimed_at
+            type: timestamptz
+          - name: claimed_by
+            type: varchar(128)
+          - name: claim_token
+            type: varchar(64)
+          - name: lease_expires_at
+            type: timestamptz
+          - name: processed_at
+            type: timestamptz
+          - name: last_error
+            type: text
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: model_pricing
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: model
+            type: varchar(191)
+          - name: meter
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "10"
+              - value: "11"
+              - value: "12"
+              - value: "2"
+              - value: "20"
+              - value: "3"
+          - name: amount
+            type: numeric(20,8)
+          - name: unit_type
+            type: smallint
+            enum_values:
+              - value: "1"
+              - value: "2"
+              - value: "3"
+          - name: unit_quantity
+            type: bigint
+          - name: currency
+            type: char(3)
+          - name: tags
+            type: jsonb
+          - name: effective_from
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: amount_scale
+            type: smallint
+      - name: model_products
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: model_product_id
+            type: varchar(64)
+          - name: create_idempotency_key
+            type: varchar(191)
+          - name: create_request_hash
+            type: varchar(64)
+          - name: model_id
+            type: varchar(191)
+          - name: model_name
+            type: varchar(255)
+          - name: provider
+            type: varchar(128)
+          - name: type
+            type: varchar(32)
+          - name: tags
+            type: jsonb
+          - name: release_date
+            type: varchar(32)
+          - name: parameters
+            type: varchar(64)
+          - name: context_length
+            type: varchar(64)
+          - name: max_output_tokens
+            type: varchar(64)
+          - name: input_modalities
+            type: jsonb
+          - name: output_modalities
+            type: jsonb
+          - name: capabilities
+            type: jsonb
+          - name: description
+            type: text
+          - name: display_badges
+            type: jsonb
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: DELISTED
+              - value: DELIST_SCHEDULED
+              - value: LISTED
+              - value: PREPUBLISHED
+          - name: listed_at
+            type: timestamptz
+          - name: delist_at
+            type: timestamptz
+          - name: delisted_at
+            type: timestamptz
+          - name: current_pricing_effective_from
+            type: timestamptz
+          - name: revision
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: publish_idempotency_key
+            type: varchar(191)
+          - name: publish_request_hash
+            type: varchar(64)
+      - name: org_tier_states
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(64)
+          - name: computed_tier
+            type: varchar(32)
+          - name: effective_tier
+            type: varchar(32)
+          - name: effective_source
+            type: varchar(16)
+            enum_values:
+              - value: computed
+              - value: override
+          - name: has_successful_recharge
+            type: boolean
+          - name: recharge_succeeded_at
+            type: timestamptz
+          - name: lifetime_consumed_amount
+            type: numeric(30,12)
+          - name: consumption_updated_at
+            type: timestamptz
+          - name: computed_at
+            type: timestamptz
+          - name: upgraded_at
+            type: timestamptz
+          - name: last_reconciled_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: computed_tier_id
+            type: varchar(64)
+          - name: computed_tier_label
+            type: varchar(32)
+          - name: effective_tier_id
+            type: varchar(64)
+          - name: effective_tier_label
+            type: varchar(32)
+          - name: policy_version
+            type: bigint
+          - name: effective_policy_version
+            type: bigint
+          - name: computed_sort_order
+            type: integer
+          - name: effective_sort_order
+            type: integer
+          - name: tier_score
+            type: numeric(30,12)
+          - name: lifetime_recharged_amount
+            type: numeric(30,12)
+          - name: recharge_updated_at
+            type: timestamptz
+          - name: quota_version
+            type: bigint
+          - name: tier_override_watermark_source_id
+            type: varchar(64)
+          - name: tier_override_watermark_version
+            type: bigint
+          - name: tier_override_watermark_hash
+            type: varchar(64)
+      - name: sync_watermarks
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: watermark_key
+            type: varchar(64)
+          - name: last_synced_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: tier_overrides
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(64)
+          - name: tier
+            type: varchar(32)
+          - name: reason
+            type: varchar(512)
+          - name: effective_from
+            type: timestamptz
+          - name: effective_to
+            type: timestamptz
+          - name: rpm
+            type: integer
+          - name: tpm
+            type: integer
+          - name: concurrency
+            type: integer
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: tier_id
+            type: varchar(64)
+          - name: tier_label
+            type: varchar(32)
+          - name: policy_version
+            type: bigint
+          - name: sort_order
+            type: integer
+          - name: source_id
+            type: varchar(64)
+          - name: source_version
+            type: bigint
+      - name: tier_policy_items
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: policy_version_id
+            type: bigint
+          - name: tier_id
+            type: varchar(64)
+          - name: label
+            type: varchar(32)
+          - name: sort_order
+            type: integer
+          - name: is_floor
+            type: boolean
+          - name: required_score
+            type: numeric(30,12)
+          - name: rpm
+            type: integer
+          - name: tpm
+            type: integer
+          - name: concurrency
+            type: integer
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-subscription.subscription.tier_policy_versions
+            "on": tier_policy_items.policy_version_id = tier_policy_versions.id
+      - name: tier_policy_versions
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: version
+            type: bigint
+          - name: recharge_score_rate
+            type: numeric(30,12)
+          - name: consumption_score_rate
+            type: numeric(30,12)
+          - name: upgrade_strategy
+            type: varchar(32)
+            enum_values:
+              - value: AUTO_UPGRADE
+          - name: downgrade_strategy
+            type: varchar(32)
+            enum_values:
+              - value: MONTHLY_ACTIVE_CONSUMPTION_DOWNGRADE
+              - value: NO_DOWNGRADE
+          - name: created_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: first_recharge_gate_amount
+            type: numeric(30,12)

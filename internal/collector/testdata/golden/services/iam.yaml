@@ -1,0 +1,579 @@
+version: 1
+service: iam
+databases:
+  - name: iam
+    tables:
+      - name: api_credentials
+        columns:
+          - name: id
+            type: bigserial
+          - name: key_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+          - name: owner_user_id
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: key_prefix
+            type: varchar(8)
+          - name: secret_sha256
+            type: bytea
+          - name: secret_encrypted
+            type: bytea
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: active
+              - value: deleted
+              - value: inactive
+          - name: inactive_reason
+            type: varchar(64)
+          - name: identity_status
+            type: varchar(32)
+            enum_values:
+              - value: approved
+              - value: pending
+              - value: rejected
+              - value: unverified
+          - name: deleted_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: casbin_rules
+        columns:
+          - name: id
+            type: bigserial
+          - name: ptype
+            type: varchar(100)
+          - name: v0
+            type: varchar(255)
+          - name: v1
+            type: varchar(255)
+          - name: v2
+            type: varchar(255)
+          - name: v3
+            type: varchar(255)
+          - name: v4
+            type: varchar(255)
+          - name: v5
+            type: varchar(255)
+      - name: invite_codes
+        columns:
+          - name: id
+            type: bigserial
+          - name: invite_code_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: code
+            type: varchar(8)
+          - name: code_upper
+            type: varchar(8)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+              - value: revoked
+          - name: revoked_at
+            type: timestamptz
+          - name: revoked_reason
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: invite_configs
+        columns:
+          - name: id
+            type: bigserial
+          - name: config_id
+            type: varchar(64)
+          - name: key
+            type: varchar(64)
+          - name: value
+            type: varchar(256)
+          - name: description
+            type: varchar(256)
+          - name: updated_by
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: migration_0007_org_group_cleanup_rollback_casbin_rules
+        columns:
+          - name: ptype
+            type: varchar(100)
+          - name: v0
+            type: varchar(255)
+          - name: v1
+            type: varchar(255)
+          - name: v2
+            type: varchar(255)
+          - name: v3
+            type: varchar(255)
+          - name: v4
+            type: varchar(255)
+          - name: v5
+            type: varchar(255)
+      - name: migration_0007_org_group_cleanup_rollback_permissions
+        columns:
+          - name: permission_id
+            type: varchar(64)
+          - name: key
+            type: varchar(128)
+          - name: description
+            type: varchar(256)
+          - name: resource
+            type: varchar(128)
+          - name: action
+            type: varchar(64)
+          - name: effect
+            type: varchar(16)
+      - name: migration_0007_org_group_cleanup_rollback_role_permissions
+        columns:
+          - name: role_id
+            type: varchar(64)
+          - name: permission_id
+            type: varchar(64)
+      - name: org_invite_links
+        columns:
+          - name: id
+            type: bigserial
+          - name: org_invite_link_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: token
+            type: varchar(64)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+              - value: disabled
+              - value: refreshed
+              - value: revoked
+          - name: created_by_user_id
+            type: varchar(64)
+          - name: created_by_role_id
+            type: varchar(64)
+            enum_values:
+              - value: org_admin
+          - name: refreshed_by_user_id
+            type: varchar(64)
+          - name: revoked_by_user_id
+            type: varchar(64)
+          - name: disabled_by_event
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: refreshed_at
+            type: timestamptz
+          - name: revoked_at
+            type: timestamptz
+          - name: disabled_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: org_join_applications
+        columns:
+          - name: id
+            type: bigserial
+          - name: org_join_application_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: org_invite_link_id
+            type: varchar(64)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: approved
+              - value: cancelled
+              - value: expired
+              - value: pending
+              - value: rejected
+          - name: reviewed_by
+            type: varchar(64)
+          - name: reviewed_at
+            type: timestamptz
+          - name: reject_reason
+            type: varchar(500)
+          - name: active_pending_org_id
+            type: varchar(64)
+          - name: active_pending_user_id
+            type: varchar(64)
+          - name: expires_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: organization_invitations
+        columns:
+          - name: id
+            type: bigserial
+          - name: invitation_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+          - name: email
+            type: varchar(255)
+          - name: status
+            type: varchar(32)
+          - name: expired_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: organization_memberships
+        columns:
+          - name: id
+            type: bigserial
+          - name: organization_id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: organization_nickname
+            type: varchar(64)
+          - name: role_id
+            type: varchar(64)
+          - name: joined_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: organizations
+        columns:
+          - name: id
+            type: bigserial
+          - name: organization_id
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: avatar_url
+            type: varchar(512)
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: active
+              - value: cancelling
+              - value: deleted
+              - value: frozen
+          - name: organization_type
+            type: varchar(32)
+            enum_values:
+              - value: individual
+              - value: team
+          - name: owner_user_id
+            type: varchar(64)
+          - name: policy_version
+            type: bigint
+          - name: realname_status
+            type: varchar(32)
+            enum_values:
+              - value: approved
+              - value: pending
+              - value: rejected
+              - value: unverified
+          - name: enterprise_cert_status
+            type: varchar(32)
+            enum_values:
+              - value: approved
+              - value: pending
+              - value: rejected
+              - value: unverified
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: deleted_at
+            type: timestamptz
+      - name: permissions
+        columns:
+          - name: id
+            type: bigserial
+          - name: permission_id
+            type: varchar(64)
+          - name: key
+            type: varchar(255)
+          - name: description
+            type: varchar(1024)
+          - name: resource
+            type: varchar(255)
+          - name: action
+            type: varchar(128)
+          - name: effect
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: personal_invite_relations
+        columns:
+          - name: id
+            type: bigserial
+          - name: personal_invite_relation_id
+            type: varchar(64)
+          - name: inviter_user_id
+            type: varchar(64)
+          - name: invitee_user_id
+            type: varchar(64)
+          - name: invite_code
+            type: varchar(8)
+          - name: source
+            type: varchar(32)
+            enum_values:
+              - value: manual_input
+              - value: org_link_embedded
+              - value: personal_link
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: invalid
+              - value: registered
+          - name: invalid_reason
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: registration_code_batches
+        columns:
+          - name: id
+            type: bigserial
+          - name: batch_id
+            type: varchar(64)
+          - name: name
+            type: varchar(128)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+              - value: terminated
+          - name: max_uses
+            type: int
+          - name: total_count
+            type: int
+          - name: valid_until
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: registration_codes
+        columns:
+          - name: id
+            type: bigserial
+          - name: registration_code_id
+            type: varchar(64)
+          - name: batch_id
+            type: varchar(64)
+          - name: code_hash
+            type: varchar(128)
+          - name: code_last4
+            type: varchar(8)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: active
+              - value: revoked
+              - value: used
+          - name: max_uses
+            type: int
+          - name: used_count
+            type: int
+          - name: valid_until
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: role_permissions
+        columns:
+          - name: id
+            type: bigserial
+          - name: role_id
+            type: varchar(64)
+          - name: permission_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: roles
+        columns:
+          - name: id
+            type: bigserial
+          - name: role_id
+            type: varchar(64)
+          - name: organization_id
+            type: varchar(64)
+          - name: role_code
+            type: varchar(64)
+          - name: name
+            type: varchar(255)
+          - name: description
+            type: varchar(1024)
+          - name: builtin
+            type: boolean
+          - name: status
+            type: varchar(32)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: user_cancellations
+        columns:
+          - name: id
+            type: varchar(64)
+          - name: user_id
+            type: varchar(128)
+          - name: individual_organization_id
+            type: varchar(128)
+          - name: cancellation_type
+            type: varchar(32)
+            enum_values:
+              - value: platform_forced
+              - value: user_requested
+          - name: reason
+            type: varchar(128)
+          - name: source
+            type: varchar(32)
+            enum_values:
+              - value: ops
+              - value: system
+              - value: user
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: deleting
+              - value: pending_physical_deletion
+              - value: physically_deleted
+              - value: restored
+          - name: effective_at
+            type: timestamptz
+          - name: soft_delete_after
+            type: timestamptz
+          - name: restored_at
+            type: timestamptz
+          - name: restored_by
+            type: varchar(128)
+          - name: physically_deleted_at
+            type: timestamptz
+          - name: primary_violation_user_id
+            type: varchar(128)
+          - name: linked_source
+            type: varchar(128)
+          - name: linked_evidence
+            type: text
+          - name: note
+            type: text
+          - name: last_failure_reason
+            type: varchar(128)
+          - name: last_failure_message
+            type: text
+          - name: last_failed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: users
+        columns:
+          - name: id
+            type: bigserial
+          - name: user_id
+            type: varchar(64)
+          - name: email
+            type: varchar(255)
+          - name: password_hash
+            type: varchar(255)
+          - name: mobile
+            type: varchar(32)
+          - name: status
+            type: varchar(32)
+          - name: username
+            type: varchar(128)
+          - name: avatar_url
+            type: varchar(512)
+          - name: frozen_at
+            type: timestamptz
+          - name: deleted_at_unix
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: registration_code_id
+            type: varchar(64)
+      - name: verifications
+        columns:
+          - name: id
+            type: bigserial
+          - name: verification_id
+            type: varchar(64)
+          - name: subject_type
+            type: varchar(32)
+            enum_values:
+              - value: organization
+              - value: user
+          - name: subject_id
+            type: varchar(64)
+          - name: actor_user_id
+            type: varchar(64)
+          - name: type
+            type: varchar(32)
+          - name: subject_name
+            type: varchar(255)
+          - name: identity_code_hash
+            type: varchar(128)
+          - name: credit_code
+            type: varchar(64)
+          - name: status
+            type: varchar(32)
+          - name: reject_reason
+            type: text
+          - name: certify_id
+            type: varchar(64)
+          - name: face_expires_at
+            type: timestamptz
+          - name: outer_order_no
+            type: varchar(64)
+          - name: certify_url
+            type: varchar(512)
+          - name: submitted_at
+            type: timestamptz
+          - name: reviewed_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: wechat_accounts
+        columns:
+          - name: id
+            type: bigserial
+          - name: user_id
+            type: varchar(64)
+          - name: union_id
+            type: varchar(64)
+          - name: open_id
+            type: varchar(64)
+          - name: nickname
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz

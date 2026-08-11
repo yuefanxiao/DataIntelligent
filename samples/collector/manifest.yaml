@@ -1,0 +1,43 @@
+# 采集清单样例：neo-cloud 生产形态（每服务一库/schema 前缀，ADR-0007）。
+#
+# 生产库名是显式事实（各服务 chart/conf 命名不统一：notification /
+# iam_audit / bss_invoice…，不能从仓库结构可靠推断），清单是采集器
+# 的确定性输入，走 git review（库名变更 = 清单变更）。
+#
+# 用样例采集：
+#   dgw-collect scan --repo ~/cloud/neo-cloud --manifest samples/collector/manifest.yaml --out /tmp/collect-out
+version: 1
+services:
+  # bss 域：迁移带 schema 前缀（schema = 库内前缀，与库同名约定）
+  - name: bss-bill
+    dir: bss/bss-bill-service
+    db: bill
+  - name: bss-wallet
+    dir: bss/bss-wallet-service
+    db: wallet
+  - name: bss-invoice
+    dir: bss/bss-invoice-service
+    db: bss_invoice
+  - name: bss-subscription
+    dir: bss/bss-subscription-service
+    db: subscription
+  - name: bss-promotion
+    dir: bss/bss-promotion-service
+    db: promotion
+  # iam 域：public schema（无前缀），库名见各服务 chart/conf
+  - name: iam
+    dir: iam/iam-service
+    db: iam
+  - name: iam-audit
+    dir: iam/iam-audit-service
+    db: iam_audit
+  # 其他域
+  - name: notification
+    dir: notification/notification-service
+    db: notification
+  - name: console
+    dir: console/console-backend
+    db: console
+  - name: ops-ticket
+    dir: ops/ops-ticket-service
+    db: ops_ticket
