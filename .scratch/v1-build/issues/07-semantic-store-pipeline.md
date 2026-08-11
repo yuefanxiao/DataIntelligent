@@ -1,7 +1,7 @@
 # v1 build 07 — 语义层运行时 + 同步管线
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/24
-Status: closed（PR #36 合入 main，squash bc50c61）
+Status: closed（PR #36 合入 main，squash bc50c61；对抗评审收敛补强 PR #37 合入 main 0767f9a）
 Blocked by: 无
 
 ## 来源
