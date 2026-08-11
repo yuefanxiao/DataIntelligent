@@ -1,7 +1,7 @@
 # v1 build 04 — execute_sql 工具：PG 接线 + dbname 路由 + 限额包层
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/21
-Status: assigned（yuefanxiao，2026-08-12 领取；实现 + 单测完成，PR 合入后关闭）
+Status: closed（2026-08-12，PR #34 合入 main；验收六条全过 + 双轴 code review 已修复）
 Blocked by (open blockers): 0
 
 ## 来源
