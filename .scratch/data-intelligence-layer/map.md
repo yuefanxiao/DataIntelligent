@@ -18,7 +18,7 @@
 - Tracker：GitHub Issues 为 canonical，本地 .scratch/ 镜像同步（见 docs/agents/issue-tracker.md）
 - 背景文档：docs/decision-discussion.md
 - 终点形态（票据 12 定）：阶段 4 = 工作台（内置 Agent 查询界面 + 语义/权限/API key 管理面），开发与产品共用；工具层始终可经 MCP/Skill 独立集成
-- 执行序（票据 12 定）：v1 全服务最小闭环构建先行（task 票 14）→ spec + phase plan（docs/spec.md）→ 团队评审（PR + 30min demo）→ 阶段 2-4
+- 执行序（票据 12 定，2026-08-11 拍板人改口为 spec 先行，修正 ADR-0010）：spec + phase plan（docs/spec.md）→ 团队评审（PR + 30min demo）→ 评审通过后 v1 全服务构建实施（task 票 14 内）→ 阶段 2-4
 
 ## Decisions so far
 

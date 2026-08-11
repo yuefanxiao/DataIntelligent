@@ -8,7 +8,7 @@ Part of #1
 
 ## Question (Task)
 
-按票据「12 阶段切分与 v1 验收标准（最小闭环）」落地 v1 最小完整闭环——本 effort 内的执行票，先于 spec 撰写与团队评审。
+按票据「12 阶段切分与 v1 验收标准（最小闭环）」落地 v1 最小完整闭环——本 effort 内的执行票。**执行序（2026-08-11 拍板人改口，修正 ADR-0010）：spec + phase plan（docs/spec.md）先行 → 团队评审 → 评审通过后实施 v1 构建。**
 
 ### 范围
 
@@ -31,6 +31,6 @@ Part of #1
 
 ### 完成后
 
-写 spec + phase plan → 交团队评审（docs/spec.md PR + 30min demo，意见清零 + 拍板人确认）→ 评审通过进入阶段 2（运营化）
+（当前阶段）产出 spec + phase plan（docs/spec.md）→ 交团队评审（PR + 30min demo，意见清零 + 拍板人确认）→ 评审通过后实施剩余交付物（网关/同步/采集/权限/验收套件）→ 进入阶段 2（运营化）
 
 参考：ADR-0001~0010、docs/research/（01 SDK 选型、02 规划草案）
