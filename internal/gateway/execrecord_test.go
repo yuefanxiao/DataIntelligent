@@ -56,7 +56,8 @@ func logRecords(t *testing.T, logDir string) []map[string]any {
 
 // spec §4.6「六工具全记」：六个工具每次调用都落一行（kind=tool_call），
 // 身份（user/key）从认证上下文如实注入；execute_sql 未配置 → 结构化拒绝
-// 记录（被拒原因 not_configured），其余五工具 stub → not_implemented。
+// 记录（被拒原因 not_configured）；五个语义工具已实装（08）：空语义库上
+// search_entities 成功（零命中），其余四工具实体不存在 → not_found 拒绝。
 func TestExecLogSixToolsRecorded(t *testing.T) {
 	logDir := t.TempDir()
 	g, st := newLoggedGateway(t, logDir)
@@ -66,7 +67,8 @@ func TestExecLogSixToolsRecorded(t *testing.T) {
 	session := connectHTTP(t, ts.URL, key)
 	defer session.Close()
 
-	// 六个工具各调一次（execute_sql 未配置 → 拒绝；其余 stub → 未实现）
+	// 六个工具各调一次（execute_sql 未配置 → 拒绝；语义工具：search 成功
+	// 零命中，其余四工具实体不存在 → 拒绝）
 	argsFor := map[string]map[string]any{
 		"search_entities":       {"query": "支付失败"},
 		"get_entity":            {"fqn": "bss.bss.orders"},
@@ -82,8 +84,14 @@ func TestExecLogSixToolsRecorded(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CallTool(%s): %v", tool, err)
 		}
+		if tool == "search_entities" {
+			if res == nil || res.IsError {
+				t.Fatalf("search_entities 空语义库检索应成功（零命中）: %+v", res)
+			}
+			continue
+		}
 		if res == nil || !res.IsError {
-			t.Fatalf("stub/未配置工具 %s 应返回错误结果", tool)
+			t.Fatalf("工具 %s 应返回错误结果", tool)
 		}
 	}
 
@@ -102,12 +110,19 @@ func TestExecLogSixToolsRecorded(t *testing.T) {
 		if r["key"] == "" {
 			t.Errorf("key 缺失: %v", r)
 		}
-		if r["status"] != "rejected" {
-			t.Errorf("%v status = %v，期望 rejected", r["tool"], r["status"])
-		}
 		byTool[r["tool"].(string)] = r
 	}
-	// execute_sql 未配置 → invalid_request/not_configured；其余 → not_implemented
+	// 状态：search_entities 成功（零命中），其余五工具 rejected（如实落原因）
+	if byTool["search_entities"]["status"] != "success" {
+		t.Errorf("search_entities status = %v，期望 success", byTool["search_entities"]["status"])
+	}
+	for _, tool := range []string{"get_entity", "traverse_relations", "get_metric_definition", "list_enum_values", "execute_sql"} {
+		if st := byTool[tool]["status"]; st != "rejected" {
+			t.Errorf("%s status = %v，期望 rejected", tool, st)
+		}
+	}
+	// execute_sql 未配置 → invalid_request/not_configured；语义四工具 →
+	// invalid_request/not_found
 	rejExec := byTool["execute_sql"]["reject"].(map[string]any)
 	if rejExec["kind"] != "invalid_request" {
 		t.Errorf("execute_sql 被拒原因 = %v", rejExec)
@@ -115,9 +130,11 @@ func TestExecLogSixToolsRecorded(t *testing.T) {
 	if d := rejExec["details"].(map[string]any); d["reason"] != "not_configured" {
 		t.Errorf("execute_sql reason = %v，期望 not_configured", d["reason"])
 	}
-	for _, tool := range []string{"search_entities", "get_entity", "traverse_relations", "get_metric_definition", "list_enum_values"} {
-		if rej := byTool[tool]["reject"].(map[string]any); rej["kind"] != "not_implemented" {
-			t.Errorf("%s 被拒原因 = %v，期望 not_implemented", tool, rej)
+	for _, tool := range []string{"get_entity", "traverse_relations", "get_metric_definition", "list_enum_values"} {
+		if rej := byTool[tool]["reject"].(map[string]any); rej["kind"] != "invalid_request" {
+			t.Errorf("%s 被拒原因 = %v，期望 invalid_request", tool, rej)
+		} else if d := rej["details"].(map[string]any); d["reason"] != "not_found" {
+			t.Errorf("%s reason = %v，期望 not_found", tool, d["reason"])
 		}
 	}
 }
@@ -332,7 +349,8 @@ func TestExecLogReplayChain(t *testing.T) {
 	session := connectHTTP(t, ts.URL, key)
 	defer session.Close()
 
-	// 调用链：语义定位（stub，拒绝）→ execute_sql 成功 → execute_sql 拒绝
+	// 调用链：语义定位（空语义库检索成功，零命中）→ execute_sql 成功 →
+	// execute_sql 拒绝
 	session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "search_entities", Arguments: map[string]any{"query": "支付失败"}})
 	callSQL(t, session, map[string]any{
@@ -343,8 +361,8 @@ func TestExecLogReplayChain(t *testing.T) {
 	if len(recs) != 3 {
 		t.Fatalf("记录数 = %d，期望 3", len(recs))
 	}
-	// [0] search_entities stub 拒绝
-	if recs[0]["tool"] != "search_entities" || recs[0]["status"] != "rejected" {
+	// [0] search_entities 成功（08 已实装；空语义库零命中也是成功调用）
+	if recs[0]["tool"] != "search_entities" || recs[0]["status"] != "success" {
 		t.Errorf("重放[0] = %v", recs[0])
 	}
 	// [1] execute_sql 成功：SQL 原文/状态/行数/plan_id/阶段/用户

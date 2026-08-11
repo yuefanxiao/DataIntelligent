@@ -51,10 +51,20 @@ func Apply(ctx context.Context, st DBer, target *Target, cur *Target) (*ApplySta
 func applyInTx(ctx context.Context, tx *sql.Tx, d *Diff) (*ApplyStats, error) {
 	s := &ApplyStats{}
 
+	// FTS 索引回填（08 票）：索引空而实体面非空 = 08 前的历史库升级（旧同步
+	// 从未写过索引行），一次性全量回填活跃实体；此后按 diff 增量维护。空
+	// 索引 + 空实体面 = 新库，无操作。与实体同事务：搜索面与实体面原子一致。
+	if err := backfillFTSIfEmpty(ctx, tx); err != nil {
+		return nil, err
+	}
+
 	// 1) 实体 upsert：diff 的新增 + 更新（含墓碑复活：目标里重新出现 = 恢复，
 	//    墓碑实体不在快照 cur 里，故必然落在 EntitiesAdded）。
 	for _, e := range append(append([]Entity{}, d.EntitiesAdded...), d.EntitiesUpdated...) {
 		if err := upsertEntity(ctx, tx, e); err != nil {
+			return nil, err
+		}
+		if err := upsertFTS(ctx, tx, e); err != nil {
 			return nil, err
 		}
 		s.EntitiesUpserted++
@@ -67,6 +77,11 @@ func applyInTx(ctx context.Context, tx *sql.Tx, d *Diff) (*ApplyStats, error) {
 			    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE fqn = ?`,
 			e.FQN); err != nil {
 			return nil, fmt.Errorf("tombstone entity %s: %w", e.FQN, err)
+		}
+		// 墓碑实体从关键词索引消失（检索默认过滤墓碑，索引删除 = 同一语义）。
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM dgw_sem_fts WHERE fqn = ?`, e.FQN); err != nil {
+			return nil, fmt.Errorf("drop fts row %s: %w", e.FQN, err)
 		}
 		s.EntitiesTombstoned++
 	}
@@ -148,6 +163,56 @@ func upsertRelation(ctx context.Context, tx *sql.Tx, r Relation) error {
 		string(r.Type), r.SrcFQN, r.DstFQN, r.Meta)
 	if err != nil {
 		return fmt.Errorf("upsert relation %s %s→%s: %w", r.Type, r.SrcFQN, r.DstFQN, err)
+	}
+	return nil
+}
+
+// backfillFTSIfEmpty 全量回填 FTS 索引（幂等）：索引空而实体面非空 =
+// 历史库升级（08 之前的同步从未写索引），把活跃实体一次性写入；此后
+// 增量维护。空索引 + 空实体面（新库）= 无操作。在 apply 事务内执行，
+// 与实体面原子一致。
+func backfillFTSIfEmpty(ctx context.Context, tx *sql.Tx) error {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM dgw_sem_fts`).Scan(&n); err != nil {
+		return fmt.Errorf("count fts rows: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT fqn, kind, name, description FROM dgw_sem_entities WHERE tombstone = 0`)
+	if err != nil {
+		return fmt.Errorf("backfill fts snapshot: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e Entity
+		var kind string
+		if err := rows.Scan(&e.FQN, &kind, &e.Name, &e.Description); err != nil {
+			return fmt.Errorf("scan fts backfill entity: %w", err)
+		}
+		e.Kind = Kind(kind)
+		if err := upsertFTS(ctx, tx, e); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// upsertFTS 把一个实体的关键词索引行置为最新内容（幂等：先删后插，
+// 描述变更时旧 trigram 不残留；fqn 是唯一键，删插即以 fqn 定位）。
+// 六类实体都进索引（FTS 是通用检索面，检索时的 kind 过滤在查询侧）。
+func upsertFTS(ctx context.Context, tx *sql.Tx, e Entity) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dgw_sem_fts WHERE fqn = ?`, e.FQN); err != nil {
+		return fmt.Errorf("delete fts row %s: %w", e.FQN, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO dgw_sem_fts (fqn, kind, name, description) VALUES (?, ?, ?, ?)`,
+		e.FQN, string(e.Kind), e.Name, e.Description); err != nil {
+		return fmt.Errorf("upsert fts row %s: %w", e.FQN, err)
 	}
 	return nil
 }

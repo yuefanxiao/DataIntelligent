@@ -87,8 +87,8 @@ func relationTargets(ctx context.Context, st DBer, typ RelationType, src string)
 }
 
 // relationSources 返回经指定类型边指向某实体的源 FQN 列表（反向遍历，
-// ADR-0001「双向可遍历」：沿 dst 索引查 src）。08 票 traverse_relations
-// 的双向语义即由此支撑。
+// ADR-0001「双向可遍历」：沿 dst 索引查 src）。traverse_relations 用
+// relationEdges（带方向与 meta 的完整边），本函数供反向清单类查询。
 func relationSources(ctx context.Context, st DBer, typ RelationType, dst string) ([]string, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT src_fqn FROM dgw_sem_relations

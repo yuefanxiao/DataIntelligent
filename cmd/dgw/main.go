@@ -108,6 +108,8 @@ env（flag 优先）：
   DGW_EXEC_LOG_DIR                执行记录目录（默认 ./logs；原始 JSONL + 聚合摘要）
   DGW_EXEC_RAW_RETENTION_DAYS     执行记录原始保留天数（默认 7，spec §4.9）
   DGW_EXEC_SUMMARY_RETENTION_DAYS 聚合摘要保留天数（默认 30，spec §4.9）
+  DGW_OPENAI_API_KEY  search_entities 向量通道（查询嵌入；缺省纯关键词检索，向量是兜底）
+  DGW_EMBEDDING_MODEL embedding 模型（默认 text-embedding-3-small；spec §4.9「env 可覆盖」）
 `)
 }
 
@@ -138,16 +140,26 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 }
 
 // gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸 +
-// 执行记录）。
+// 执行记录 + search_entities 向量通道）。
 // 并发闸恒注入：即使未配置 PG 路由，env 数值也经 WithLoadGate 校验
 // （越界配置同样启动失败，不会静默退化为默认 2/8）。执行记录恒注入：
 // 目录不可写 = 启动失败（execLog fail fast），不存在「带病不记录」形态。
+// search_entities 向量通道（08 票）：DGW_OPENAI_API_KEY 存在时注入查询侧
+// embedder（RRF 向量兜底）；缺省纯关键词检索（向量是兜底通道，不配置
+// 不降级报错）。
 // cleanup 关闭执行记录器与 PG 路由（路由未配置时只关记录器）。
 func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 	lg := execLog(cfg)
 	opts := []gateway.Option{
 		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
 		gateway.WithExecLog(lg),
+	}
+	if key := os.Getenv(config.EnvOpenAIKey); key != "" {
+		model := os.Getenv(config.EnvEmbeddingModel)
+		if model == "" {
+			model = semantic.DefaultEmbeddingModel
+		}
+		opts = append(opts, gateway.WithSearchEmbed(semantic.NewOpenAIEmbedder(key, model)))
 	}
 	router, err := buildRouter(cfg)
 	if err != nil {
@@ -518,6 +530,14 @@ func cmdSemanticSync() {
 		if err := semantic.RemoveEmbeddings(ctx, st, deleted); err != nil {
 			log.Printf("清理墓碑实体向量失败（降级不阻塞）: %v", err)
 		}
+	}
+	// vec0 索引迁移/维护（08 票，ADR-0005 落地）：07 时代的库只有 BLOB
+	// 没有 vec0——幂等建表 + 回填存量同维向量；此后由 SaveEmbeddings
+	// 双写维护。维度自动推导（dim=0）：存量向量取最长维，无存量取默认
+	// 模型维——非 1536 维模型（DGW_EMBEDDING_MODEL 切换）下不反复重建
+	// （review 修复）。失败降级：检索退化为纯关键词（向量是兜底通道）。
+	if err := semantic.EnsureVecIndex(ctx, st, 0); err != nil {
+		log.Printf("vec0 索引维护失败（降级：检索退化为纯关键词）: %v", err)
 	}
 	fmt.Printf("dgw: 语义同步完成（实体 upsert %d / 墓碑 %d，边 %d/%d，枚举 %d/%d）\n",
 		res.Stats.EntitiesUpserted, res.Stats.EntitiesTombstoned,
