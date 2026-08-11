@@ -5,6 +5,10 @@
 bin/
 *.test
 
+# Runtime state（SQLite 运行时存储，含 -wal/-shm 伴随文件）
+dgw.db
+dgw.db-*
+
 # Node
 node_modules/
 
