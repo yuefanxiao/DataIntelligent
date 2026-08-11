@@ -17,6 +17,8 @@
 - 每次解决票据的 session 应 consult：/grilling、/domain-modeling
 - Tracker：GitHub Issues 为 canonical，本地 .scratch/ 镜像同步（见 docs/agents/issue-tracker.md）
 - 背景文档：docs/decision-discussion.md
+- 终点形态（票据 12 定）：阶段 4 = 工作台（内置 Agent 查询界面 + 语义/权限/API key 管理面），开发与产品共用；工具层始终可经 MCP/Skill 独立集成
+- 执行序（票据 12 定）：v1 全服务最小闭环构建先行（task 票 14）→ spec + phase plan（docs/spec.md）→ 团队评审（PR + 30min demo）→ 阶段 2-4
 
 ## Decisions so far
 
@@ -35,29 +37,23 @@
 - [10 SQL 生成路线决策：Wren 自托管 vs 自研 vs LLM+校验](https://github.com/yuefanxiao/DataIntelligent/issues/11) — v1 路线 = 02 方案甲（Agent 侧规划）+ 05 指标确定性编译 + **网关确定性校验层**（execute_sql 内部强制管线：wasilibs/go-pgquery cgo-free AST 分类（非 SELECT 一律拒）→ AST 为唯一授权通道比对 03 表 FQN 白名单 → PG 共享只读角色/超时物理边界 → `SELECT * FROM (<sql>) _q LIMIT N` 限额包层）；失败=结构化错误回传调用方、网关无自愈循环；并发闸（每 key+进程级，超限结构化拒绝）+ statement_timeout 收紧，数值归 12；数据行流向消费方 Agent=产品设计，网关第三方出口仅元数据 embedding（07）；**Wren 自托管出局**（2026 事实：经典栈冻结 legacy/v1 不修安全、新 OSS 无 Go 绑定/无 HTTP API、RLS/审计=商业版）；不自研完整 compiler（自由诉求需 LLM 在前端、规划器级工程量）；v2 create_query_plan 引擎选型延后（12 排期时定，02 草案接口冻结、plan_id 已预留、引擎可插拔）。输出 03（校验层=授权物理实现）、12（落地/数值/排期）；ADR-0008。
 
 - [11 部署拓扑：本地起步、接从库、高可用](https://github.com/yuefanxiao/DataIntelligent/issues/12) — 双传输实现（Streamable HTTP 为主 + bearer token 认证、stdio 调试形态；并发闸按守护进程语义，数值归 12）；部署位 = **内部开发机单机 Docker**（不进生产集群：SQLite/logs/env 三 volume、restart 兜底），数据库凭证仅存该机 env 文件、开发机零凭证；从库连接 = **可配置 DSN 口子** + dbname 路由（生产网络通路方案生产部署时定）；DB 角色 = 专用共享只读角色、**provisioning 开发自建**（服务器 root/kubectl 取 CNPG postgres 超管建角色）、网关永不超管；执行记录 JSONL = 网关机本地 volume；采集器保留 = 手动 on-demand 无轮询 + 采集工作流 Skill 记 v1 交付物；数据新鲜度 = 接受从库延迟 + 启动自检（pg_is_in_recovery + 角色级 statement_timeout，不过拒启）；监控/告警、正式上线回滚流程 = 后续优化项。解封 12；输出 12（交付物清单、数值按守护进程语义）；ADR-0009。
+- [12 阶段切分与 v1 验收标准（最小闭环）](https://github.com/yuefanxiao/DataIntelligent/issues/13) — 时序 = v1 全服务最小闭环构建先行 → spec+phase plan（docs/spec.md）→ 团队评审（PR + 30min demo，意见清零+拍板）→ 阶段 2-4；v1 = 13 服务全量（~/cloud/neo-cloud，结构自动+语义人工确认全服务，交付物清单含采集工作流 Skill/golden 语料/验收套件）、负载防护 = 每 key 2/进程级 8/statement_timeout 30s（可配）、限额 500/5000；验收 = 主用例「昨天支付失败率为什么上涨」全流程 + 每服务 ≥2 简单+≥1 复杂 + 负向/边界 5 例（无 grants 测试用户），判定三件套（psql 对照/执行记录可复现/零未授权），用例兼作 golden 语料、v1 后按效果迭代；阶段 2=运营化（Gitea 触发/校准·drift 例行/监控告警+复制延迟/生产通路全团队接入）、阶段 3=能力深化（v2 规划引擎/权限优化/工作台管理面/采集源扩展）、阶段 4=工作台+开放（内置 Agent 界面、PM 接入、MCP/Skill 并存；编排形态阶段 3 末定）；里程碑制无日期；输出 14（v1 构建 task 票）；ADR-0010。
 
 ## Not yet specified
 
-- 权限后续优化：列级权限（拒绝/掩码）、行级 RLS、key 过期策略（03 决议后置，12 排期时定）
-- 管理工作台/控制台形态（权限与 API key 的更新界面 + 管理员口令）——03 已定 v2 候选，v1 用 grants YAML + CLI
-- 复制延迟监测（pg_stat_replication 周期性读数）——11 已定 v1 不做，与监控栈一并定
-- Gitea 事件触发增量采集（合入 main 的 PR 带约定 label → 自动触发）的 label 约定与 CI 形态——08 已定后置，12 排期时定
-- 校准（calibrate 子命令）的例行化排程——08 已定 v1 按需，drift 每周例行与校准合流
-- API 定义采集（protobuf/OpenAPI）——08 已定 v1 排除，v2 候选
-- neo-cloud 之外的服务仓库（若生产服务不止于此）——采集源扩展，08 按「neo-cloud 即全部」假设记录
-- 网关高可用/监控/告警（含 OTel）——11 已定 v1 不做（执行记录 + docker restart 兜底），后续优化项；OTel = 多机/HA 出现时升级路径（ADR-0006 在案）
-- v2 网关侧规划引擎选型（create_query_plan：外部 LLM API vs 私有化模型 vs 不做网关侧规划）与诉求/元数据出机房边界——10 已定延后，12 排期时定
-- 生产网络通路方案（NodePort vs port-forward 常驻 vs 内网 LB；开发机无法解析集群内 DNS）——11 已定 v1 可配置 DSN 留口子，生产部署时定
-- 负载防护参数（每 key/进程级并发上限、statement_timeout 默认值）——10 已定机制，数值归 12 定
+- 阶段 2-4 入口评审时开票（12 已定排期）：v2 规划引擎选型（10 接口冻结）、权限优化（列级/掩码/RLS/key 过期）、工作台管理面、Gitea 触发采集、监控/告警 + OTel、校准例行化、API 定义采集、neo-cloud 之外采集源扩展、复制延迟监测、生产网络通路（NodePort/port-forward/LB）
+- 内置 Agent 编排形态（自研 vs 接现成，如 Claude Code 网页版/LangGraph）——12 已定阶段 3 末再定
 
 ## Out of scope
 
-- PM 自助 Web 查询界面（v1 消费方是开发人员）
 - 非 PostgreSQL 数据库支持
 - 写操作 / DDL
 - 独立 Agent 产品（工具层先行，Q6b）
 - 跨会话记忆与自进化（长期愿景，目的地重画时再议）
 - 数仓 / OLAP 分析
+
+
+
 
 
 
