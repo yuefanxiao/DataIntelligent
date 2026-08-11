@@ -13,7 +13,8 @@ import (
 	"fmt"
 	"net/url"
 
-	_ "modernc.org/sqlite" // 驱动名 "sqlite"，纯 Go 实现
+	_ "modernc.org/sqlite"     // 驱动名 "sqlite"，纯 Go 实现
+	_ "modernc.org/sqlite/vec" // sqlite-vec（08 票，ADR-0005）：init 里 auto-extension 注册 vec0 虚拟表，进程内对所有新连接生效
 )
 
 const driverName = "sqlite"
@@ -163,21 +164,44 @@ CREATE TABLE IF NOT EXISTS dgw_sem_enum_values (
     UNIQUE (column_fqn, value)
 );
 
--- 实体向量（search_entities 向量兜底；07 只写入，08 票接 sqlite-vec/暴力余弦）。
--- vector = float32 小端序列（1536 维 × 4 字节）。
+-- 实体向量（search_entities 向量兜底；07 只写入，08 票接检索）。
+-- vector = float32 小端序列（text-embedding-3-small 为 1536 维 × 4 字节）。
 --
--- 决策记录（07 票，ADR-0005 的落地偏差）：ADR-0005 选定 sqlite-vec vec0
--- 虚拟表做 KNN，但 modernc.org/sqlite v1.42.2 不含内置 vec（v1.47.0+ 才有）；
--- 07 只承担「写入向量」，检索在 08 票，故先用普通表 BLOB 落库。BLOB 的
--- float32 小端序列与 sqlite-vec 内部格式字节兼容——08 票升级驱动后迁移 =
--- INSERT INTO vec0 SELECT（或直接暴力余弦），无需重嵌入。不升级到 v1.50 的
--- 原因：依赖大跳版本（libc 等间接依赖）、02-05 票回归面未知，且 07 无
--- 检索消费方。此偏差不修改 ADR-0005 正文（08 票按 ADR 落地时执行迁移）。
+-- 决策记录（07 票的落地偏差，08 票执行迁移）：ADR-0005 选定 sqlite-vec
+-- vec0 虚拟表做 KNN，但 modernc.org/sqlite v1.42.2 不含内置 vec；07 只承担
+-- 「写入向量」，先用普通表 BLOB 落库（与 sqlite-vec 内部格式字节兼容）。
+-- 08 票升级驱动至 v1.50.0（内置 sqlite-vec v0.1.9 的 CGO-free 移植）并建
+-- vec0 索引表 dgw_sem_vec：本表仍是向量的事实存储面（model 元数据 +
+-- EmbeddingCoverage 依据），vec0 是检索索引，两者由 SaveEmbeddings /
+-- RemoveEmbeddings 双写维护；存量行经 ensureSchema 的幂等回填迁移
+-- （INSERT INTO vec0 SELECT，无需重嵌入）。
 CREATE TABLE IF NOT EXISTS dgw_sem_embeddings (
     entity_fqn TEXT PRIMARY KEY,
     model      TEXT NOT NULL,              -- 如 text-embedding-3-small
     vector     BLOB NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+-- 关键词检索索引（08 票，ADR-0005「关键词 = FTS5」）：search_entities 的
+-- 关键词主通道。trigram 分词（CJK 子串 + 英文子串匹配，2 字符内查询退
+-- LIKE 兜底，见 semantic/search.go）。kind 列不参与分词（UNINDEXED），
+-- 供查询侧按实体类型过滤。与实体同事务维护（semantic.Apply 内增删改），
+-- 墓碑实体即从索引消失——检索面与实体面原子一致。
+CREATE VIRTUAL TABLE IF NOT EXISTS dgw_sem_fts USING fts5(
+    fqn UNINDEXED,
+    kind UNINDEXED,
+    name,
+    description,
+    tokenize='trigram'
+);
+
+-- 向量检索索引（08 票，ADR-0005 sqlite-vec）：vec0 KNN 虚拟表。
+-- entity_fqn 主键 + vector float[N]（N = 模型维度）；维度随模型固定，
+-- 模型切换（维度变化）由 semantic.EnsureVecIndex 检测并重建。
+-- 初次创建用 v1 默认模型 text-embedding-3-small 的维度 1536。
+CREATE VIRTUAL TABLE IF NOT EXISTS dgw_sem_vec USING vec0(
+    entity_fqn TEXT PRIMARY KEY,
+    vector float[1536]
 );
 
 -- 服务/库级通配授权声明（ADR-0004 语法糖）：grants-apply 展开为具体表清单
@@ -193,8 +217,24 @@ CREATE TABLE IF NOT EXISTS dgw_grant_patterns (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
 	}
+	// 存量向量迁移（08 票，ADR-0005 落地）：07 时代的库只有 BLOB 表没有
+	// vec0 索引——幂等回填（维度匹配的行补齐进索引，跳过已存在的），后续
+	// 由 SaveEmbeddings 双写维护。维度过滤防模型切换残留的异维向量进 KNN
+	// （混合维度余弦 = 垃圾检索结果，与 EmbeddingCoverage 同一动机）。
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO dgw_sem_vec (entity_fqn, vector)
+SELECT entity_fqn, vector FROM dgw_sem_embeddings
+WHERE length(vector) = ? AND NOT EXISTS (
+    SELECT 1 FROM dgw_sem_vec v WHERE v.entity_fqn = dgw_sem_embeddings.entity_fqn)`,
+		vec0Dim*4); err != nil {
+		return fmt.Errorf("migrate embeddings to vec0: %w", err)
+	}
 	return nil
 }
+
+// vec0Dim 是 vec0 索引表的初始向量维度（与 v1 默认模型
+// text-embedding-3-small 的 1536 维一致；模型切换由 EnsureVecIndex 重建）。
+const vec0Dim = 1536
 
 // PermissionRevision 返回当前权限版本号（热重载轮询的读取面）。
 func (s *Store) PermissionRevision(ctx context.Context) (int64, error) {

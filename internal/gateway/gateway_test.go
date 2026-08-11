@@ -232,25 +232,31 @@ func TestHTTPEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CallTool(%s): %v", tool, err)
 		}
-		e := decodeErrorResult(t, res)
+		if tool == "search_entities" {
+			// 已实装（08）：空语义库检索成功（零命中，非错误）。
+			if res == nil || res.IsError {
+				t.Errorf("CallTool(search_entities) 空语义库应返回成功（零命中）: %+v", res)
+			}
+			continue
+		}
 		if tool == "execute_sql" {
 			// execute_sql 已实装（04）：未注入 PG 路由时返回结构化「未配置」。
+			e := decodeErrorResult(t, res)
 			if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "not_configured" {
 				t.Errorf("CallTool(execute_sql) 错误 = %s [%s], want invalid_request/not_configured", e.Kind, e.Code)
 			}
 			continue
 		}
-		if e.Kind != gwerr.KindNotImplemented || e.Code != "DGW_NOT_IMPLEMENTED" {
-			t.Errorf("CallTool(%s) 错误 = %s [%s], want not_implemented/DGW_NOT_IMPLEMENTED", tool, e.Kind, e.Code)
-		}
-		if e.Details["tool"] != tool {
-			t.Errorf("CallTool(%s) details.tool = %v, want %s", tool, e.Details["tool"], tool)
+		// 语义四工具已实装（08）：空语义库无该实体 → 结构化 not_found。
+		e := decodeErrorResult(t, res)
+		if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "not_found" {
+			t.Errorf("CallTool(%s) 错误 = %s [%s], want invalid_request/not_found", tool, e.Kind, e.Code)
 		}
 	}
 }
 
-// sampleArgs 给各 stub 工具一个形状合法的调用参数（schema 校验应放行，
-// 然后返回 not_implemented）。
+// sampleArgs 给各工具一个形状合法的调用参数（schema 校验应放行；空语义
+// 库上语义工具返回 not_found、execute_sql 返回 not_configured）。
 func sampleArgs(tool string) map[string]any {
 	switch tool {
 	case "search_entities":
