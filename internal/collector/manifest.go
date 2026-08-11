@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,6 +52,18 @@ func LoadManifest(path string) (*Manifest, error) {
 		if s.Name == "" || s.Dir == "" || s.DB == "" {
 			return nil, fmt.Errorf("采集清单 %s: 第 %d 个服务缺 name/dir/db 字段", path, i+1)
 		}
+		// 服务名/库名是 FQN 段与草稿文件名：只允许标识符形态
+		// （防路径穿越——name 直接拼进 services/<name>.yaml）。
+		if !identRe.MatchString(s.Name) {
+			return nil, fmt.Errorf("采集清单 %s: 服务名 %q 非法（只允许小写字母/数字/连字符/下划线，且不以连字符开头）", path, s.Name)
+		}
+		if !identRe.MatchString(s.DB) {
+			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的库名 %q 非法（只允许小写字母/数字/连字符/下划线，且不以连字符开头）", path, s.Name, s.DB)
+		}
+		// dir 是相对 repo root 的路径：拒绝绝对路径与 .. 逃逸。
+		if filepath.IsAbs(s.Dir) || strings.Contains(s.Dir, "..") {
+			return nil, fmt.Errorf("采集清单 %s: 服务 %s 的 dir %q 必须相对且不含 ..", path, s.Name, s.Dir)
+		}
 		if seen[s.Name] {
 			return nil, fmt.Errorf("采集清单 %s: 服务名重复 %q", path, s.Name)
 		}
@@ -60,6 +74,10 @@ func LoadManifest(path string) (*Manifest, error) {
 	}
 	return &m, nil
 }
+
+// identRe 是服务名/库名的合法形态（FQN 段 + 草稿文件名双约束；
+// 下划线放行——生产库名含下划线，如 bss_invoice/iam_audit）。
+var identRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // Find 按服务名找清单条目。
 func (m *Manifest) Find(name string) (*ManifestService, error) {

@@ -190,7 +190,15 @@ func findTableName(f *ast.File, structName string) string {
 		if name != structName {
 			continue
 		}
+		// 防御：非常规方法形态（无返回值/空函数体/裸 return）是
+		// 编译期合法的 Go——逐层判空，命中即跳过（不能 panic）。
+		if fd.Type == nil || fd.Type.Results == nil || len(fd.Type.Results.List) == 0 {
+			continue
+		}
 		if ret, ok := fd.Type.Results.List[0].Type.(*ast.Ident); !ok || ret.Name != "string" {
+			continue
+		}
+		if fd.Body == nil || len(fd.Body.List) == 0 {
 			continue
 		}
 		// 返回单个字符串字面量。

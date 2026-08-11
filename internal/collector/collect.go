@@ -1,8 +1,12 @@
 package collector
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // ServiceResult 是一个服务的一次采集结果。
@@ -64,9 +68,43 @@ func Collect(cfg CollectConfig) (*CollectResult, error) {
 	if len(res.Services) == 0 {
 		return nil, fmt.Errorf("没有采集任何服务（清单为空或 --service %q 不在清单里）", cfg.Service)
 	}
+	// 协调残稿：services/ 里不在清单中的旧草稿（服务从清单移除后）
+	// 必须清掉——全量重建语义，避免陈旧服务混进门禁与同步管线。
+	if err := reconcileDrafts(cfg.OutDir, cfg.Manifest); err != nil {
+		return nil, err
+	}
 	// 第三道闸：采集产出必须过同步管线编译校验（可进同步管线）。
 	res.CompileErr = CheckCompile(cfg.OutDir)
 	return res, nil
+}
+
+// reconcileDrafts 删除 services/ 下不在清单里的草稿文件（幂等）。
+func reconcileDrafts(outDir string, m *Manifest) error {
+	dir := filepath.Join(outDir, "services")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读取草稿目录 %s: %w", dir, err)
+	}
+	inManifest := map[string]bool{}
+	for _, s := range m.Services {
+		inManifest[s.Name] = true
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".yaml")
+		if inManifest[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("清理陈旧草稿 %s: %w", e.Name(), err)
+		}
+	}
+	return nil
 }
 
 // collectService 采集一个服务：解析迁移 → 交叉验证 → 写草稿。
@@ -85,9 +123,7 @@ func collectService(cfg CollectConfig, ms *ManifestService) (*ServiceResult, err
 
 	sr := &ServiceResult{Name: ms.Name, DB: ms.DB, Findings: findings}
 	sr.Tables, sr.Columns, sr.Enums, sr.Refs = st.stats()
-	if len(st.Tables) > 0 {
-		sr.Schema = st.Tables[0].Schema
-	}
+	sr.Schema = distinctSchemas(st)
 
 	if _, err := WriteDraft(cfg.OutDir, st); err != nil {
 		return nil, err
@@ -130,4 +166,23 @@ func unresolvedRefFindings(st *Structure) []Finding {
 	}
 	sortFindings(fs)
 	return fs
+}
+
+// distinctSchemas 返回服务结构的去重 schema 列表（信息性输出；
+// "" 显示为 public）。
+func distinctSchemas(st *Structure) string {
+	seen := map[string]bool{}
+	var schemas []string
+	for _, t := range st.Tables {
+		s := t.Schema
+		if s == "" {
+			s = "public"
+		}
+		if !seen[s] {
+			seen[s] = true
+			schemas = append(schemas, s)
+		}
+	}
+	sort.Strings(schemas)
+	return strings.Join(schemas, ",")
 }

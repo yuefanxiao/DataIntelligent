@@ -163,3 +163,35 @@ databases:
 		t.Error("空枚举值应编译失败（原子拒绝）")
 	}
 }
+
+// TestLoadManifestIdentValidation 服务名/库名标识符校验（防路径穿越）。
+func TestLoadManifestIdentValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct{ name, content string }{
+		{"traversal.yaml", "version: 1\nservices:\n  - name: ../../etc/passwd\n    dir: x\n    db: d\n"},
+		{"dot.yaml", "version: 1\nservices:\n  - name: a.b\n    dir: x\n    db: d\n"},
+		{"upper.yaml", "version: 1\nservices:\n  - name: AService\n    dir: x\n    db: d\n"},
+		{"dashlead.yaml", "version: 1\nservices:\n  - name: -svc\n    dir: x\n    db: d\n"},
+		{"baddb.yaml", "version: 1\nservices:\n  - name: ok\n    dir: x\n    db: ../evil\n"},
+		{"absdir.yaml", "version: 1\nservices:\n  - name: ok\n    dir: /etc\n    db: d\n"},
+		{"dotdotdir.yaml", "version: 1\nservices:\n  - name: ok\n    dir: a/../b\n    db: d\n"},
+	}
+	for _, tc := range cases {
+		p := write(tc.name, tc.content)
+		if _, err := LoadManifest(p); err == nil {
+			t.Errorf("%s 应被拒绝", tc.name)
+		}
+	}
+	// 合法形态放行。
+	ok := write("ok.yaml", "version: 1\nservices:\n  - name: bss-wallet\n    dir: bss/bss-wallet-service\n    db: wallet\n")
+	if _, err := LoadManifest(ok); err != nil {
+		t.Errorf("合法清单应通过: %v", err)
+	}
+}

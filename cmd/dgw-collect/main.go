@@ -36,7 +36,7 @@ func main() {
 
 	if len(os.Args) < 2 {
 		usage()
-		os.Exit(2)
+		os.Exit(1)
 	}
 	switch os.Args[1] {
 	case "scan":
@@ -48,7 +48,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "dgw-collect: 未知子命令 %q\n\n", os.Args[1])
 		usage()
-		os.Exit(2)
+		os.Exit(1)
 	}
 }
 
@@ -73,22 +73,31 @@ func usage() {
 → dgw semantic-sync。校准是 v1 低优先的兜底（migration 文件非绝对
 真相，手工 DDL 先例存在）。
 
-退出码：0 全过 / 2 有 error 级发现（草稿照写，交人确认）/ 1 操作失败。
+退出码：0 全过 / 2 有 error 级发现（草稿照写，交人确认）/ 1 操作失败
+（参数/目录/连接错误）。
+
+注意：--service 增量采集时，第三道闸（编译兼容）校验的是 out 目录里
+现有全部草稿（含早前采集的），服务从清单移除后请清理 out 目录或重跑
+全量采集。
 `)
 }
 
 // cmdScan 跑 scan；返回进程退出码。
 func cmdScan() int {
-	fs := flag.NewFlagSet("scan", flag.ExitOnError)
+	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	repo := fs.String("repo", "", "服务仓库根目录")
 	manifest := fs.String("manifest", "", "采集清单路径")
 	service := fs.String("service", "", "只采集清单里一个服务")
 	out := fs.String("out", "./collect-out", "草稿输出目录")
 	noGorm := fs.Bool("no-gorm", false, "跳过 GORM 交叉验证")
-	fs.Parse(os.Args[2:])
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return 1 // flag 用法错误 = 操作失败（1），与「2 = 门禁发现」区分
+	}
 
 	if *repo == "" || *manifest == "" {
-		log.Fatal("scan 需要 --repo 与 --manifest")
+		log.Print("scan 需要 --repo 与 --manifest")
+		return 1
 	}
 	m, err := collector.LoadManifest(*manifest)
 	if err != nil {
@@ -129,15 +138,19 @@ func cmdScan() int {
 
 // cmdCalibrate 连只读从库做生产校准；返回进程退出码。
 func cmdCalibrate() int {
-	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
+	fs := flag.NewFlagSet("calibrate", flag.ContinueOnError)
 	repo := fs.String("repo", "", "服务仓库根目录")
 	manifest := fs.String("manifest", "", "采集清单路径")
 	service := fs.String("service", "", "要校准的服务（必填，一次一个）")
-	dsn := fs.String("dsn", "", "只读从库连接串")
-	fs.Parse(os.Args[2:])
+	dsn := fs.String("dsn", os.Getenv("DGW_COLLECT_DSN"), "只读从库连接串（可经 DGW_COLLECT_DSN env 传入，避免 argv 泄露口令）")
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return 1
+	}
 
 	if *repo == "" || *manifest == "" || *service == "" || *dsn == "" {
-		log.Fatal("calibrate 需要 --repo --manifest --service --dsn")
+		log.Print("calibrate 需要 --repo --manifest --service --dsn（DSN 也可经 DGW_COLLECT_DSN 环境变量传入）")
+		return 1
 	}
 	m, err := collector.LoadManifest(*manifest)
 	if err != nil {
@@ -149,13 +162,19 @@ func cmdCalibrate() int {
 	}
 	st, findings, err := collector.ParseServiceMigrations(ms, *repo)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Printf("%v", err)
+		return 1
 	}
+	migrationErrors := 0
 	for _, f := range findings {
 		fmt.Printf("  %s\n", f.String())
+		if f.Severity == collector.SeverityError {
+			migrationErrors++
+		}
 	}
 	if len(st.Tables) == 0 {
-		log.Fatal("迁移解析没有产出任何表，无法校准")
+		log.Print("迁移解析没有产出任何表，无法校准")
+		return 1
 	}
 	ctx := context.Background()
 	calFindings, err := collector.Calibrate(ctx, *dsn, st)
@@ -177,14 +196,16 @@ func cmdCalibrate() int {
 		}
 	}
 	fmt.Printf("dgw: 校准完成（漂移报告只报告不改）：error %d / warn %d\n", errs, warns)
-	if errs > 0 {
+	// 迁移解析的 error 级发现（不可解析文件）与校准发现同门禁
+	// （与 scan 的门禁语义一致）。
+	if errs+migrationErrors > 0 {
 		return 2
 	}
 	return 0
 }
 
 func schemaSuffix(s string) string {
-	if s == "" {
+	if s == "" || s == "public" {
 		return "（public）"
 	}
 	return "（schema " + s + "）"

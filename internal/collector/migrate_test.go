@@ -216,3 +216,95 @@ func parseOne(t *testing.T, ddl string) (*Structure, []Finding) {
 	}
 	return ParseMigrations("svc", "db", []string{f})
 }
+
+// TestParseFkNoTargetColumns REFERENCES 简写（未指定目标列）——
+// 曾经触发 On() 越界 panic 的形态；on 条件留空 + warn。
+func TestParseFkNoTargetColumns(t *testing.T) {
+	ddl := `CREATE TABLE u (id bigint);
+	CREATE TABLE t (u_id bigint REFERENCES u);`
+	st, findings := parseOne(t, ddl)
+	refs := st.findTable("t").References
+	if len(refs) != 1 {
+		t.Fatalf("references = %d, want 1", len(refs))
+	}
+	if refs[0].On("t") != "" {
+		t.Errorf("未指定目标列的外键 on 应留空, got %q", refs[0].On("t"))
+	}
+	warn := false
+	for _, f := range findings {
+		if f.Severity == SeverityWarn && strings.Contains(f.Message, "未指定目标列") {
+			warn = true
+		}
+	}
+	if !warn {
+		t.Errorf("应有「未指定目标列」warn: %v", findings)
+	}
+}
+
+// TestParseFkAutoNameDrop 内联匿名外键按 PG 自动名登记：
+// DROP CONSTRAINT <表>_<列>_fkey 能撤掉引用边。
+func TestParseFkAutoNameDrop(t *testing.T) {
+	ddl := `CREATE TABLE u (id bigint);
+	CREATE TABLE t (u_id bigint REFERENCES u(id));
+	ALTER TABLE t DROP CONSTRAINT t_u_id_fkey;`
+	st, _ := parseOne(t, ddl)
+	if len(st.findTable("t").References) != 0 {
+		t.Error("按 PG 自动名 DROP CONSTRAINT 后引用边应被撤掉")
+	}
+}
+
+// TestParseAddColumnIfNotExistsNoop ADD COLUMN IF NOT EXISTS 对已存在
+// 列整体 no-op（该语句自带的列级约束不生效；同一语句里独立的
+// ADD CONSTRAINT 命令照常生效——那是另一条命令，PG 语义如此）。
+func TestParseAddColumnIfNotExistsNoop(t *testing.T) {
+	ddl := `CREATE TABLE t (status smallint NOT NULL);
+	ALTER TABLE t ADD COLUMN IF NOT EXISTS status smallint CHECK (status IN (9, 8));`
+	st, _ := parseOne(t, ddl)
+	col := st.findTable("t").findColumn("status")
+	if len(col.EnumValues) != 0 {
+		t.Errorf("IF NOT EXISTS no-op 语句不应注入枚举: %v", col.EnumValues)
+	}
+	// 同语句的独立 ADD CONSTRAINT 命令照常生效。
+	ddl2 := `CREATE TABLE t (status smallint NOT NULL);
+	ALTER TABLE t ADD COLUMN IF NOT EXISTS status smallint,
+		ADD CONSTRAINT ck_status2 CHECK (status IN (9, 8));`
+	st2, _ := parseOne(t, ddl2)
+	if !eqStrings(st2.findTable("t").findColumn("status").EnumValues, []string{"8", "9"}) {
+		t.Errorf("独立 ADD CONSTRAINT 应生效: %v", st2.findTable("t").findColumn("status").EnumValues)
+	}
+}
+
+// TestParseRenameWarn RENAME COLUMN/TABLE 未处理 → warn 发现。
+func TestParseRenameWarn(t *testing.T) {
+	ddl := `CREATE TABLE t (a bigint);
+	ALTER TABLE t RENAME COLUMN a TO b;`
+	_, findings := parseOne(t, ddl)
+	warn := false
+	for _, f := range findings {
+		if f.Severity == SeverityWarn && strings.Contains(f.Message, "改名") {
+			warn = true
+		}
+	}
+	if !warn {
+		t.Errorf("RENAME COLUMN 应有 warn: %v", findings)
+	}
+}
+
+// TestParseUnhandledAlterWarn 未处理的结构影响型 ALTER 子类型 → warn。
+func TestParseUnhandledAlterWarn(t *testing.T) {
+	ddl := `CREATE TABLE t (a bigint);
+	ALTER TABLE t RENAME TO t2;`
+	st, findings := parseOne(t, ddl)
+	if st.findTable("t2") != nil {
+		t.Error("RENAME TABLE 未处理，表名不应变")
+	}
+	warn := false
+	for _, f := range findings {
+		if f.Severity == SeverityWarn && strings.Contains(f.Message, "未处理") {
+			warn = true
+		}
+	}
+	if !warn {
+		t.Errorf("RENAME TABLE 应有 warn: %v", findings)
+	}
+}

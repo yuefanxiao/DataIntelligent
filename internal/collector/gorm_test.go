@@ -215,3 +215,42 @@ func TestSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// TestGormTableNameWeirdForms 非常规 TableName() 形态（无返回值/
+// 空函数体/裸 return）不 panic，静默跳过。
+func TestGormTableNameWeirdForms(t *testing.T) {
+	dir := t.TempDir()
+	writeModel(t, dir, "weird.go", `package data
+
+type NoReturnPO struct {
+	ID int64
+}
+
+func (NoReturnPO) TableName() {}
+
+type EmptyBodyPO struct {
+	ID int64
+}
+
+func (EmptyBodyPO) TableName() string {}
+
+type BareReturnPO struct {
+	ID int64
+}
+
+func (BareReturnPO) TableName() string { return }
+
+type GoodPO struct {
+	ID int64 `+"`gorm:\"primaryKey\"`"+`
+}
+
+func (GoodPO) TableName() string { return "good" }
+`)
+	models, findings := ExtractGormModels(dir)
+	if len(findings) != 0 {
+		t.Fatalf("不应有发现: %v", findings)
+	}
+	if len(models) != 1 || models[0].Table != "good" {
+		t.Fatalf("只应提取 GoodPO, got %v", models)
+	}
+}

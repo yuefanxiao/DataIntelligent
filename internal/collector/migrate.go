@@ -94,6 +94,16 @@ func applyStmt(st *Structure, stmt *pg_query.RawStmt, src, file string, findings
 				}
 			}
 		}
+	case *pg_query.Node_RenameStmt:
+		// 结构影响型 RENAME（表/列/约束）静默跳过 = 草稿与生产不一致；
+		// 索引/类型改名不影响结构中间态，跳过。
+		switch n.RenameStmt.RenameType {
+		case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_COLUMN,
+			pg_query.ObjectType_OBJECT_TABCONSTRAINT:
+			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+				fmt.Sprintf("%s: %s 改名（%s）未处理（结构可能不完整，请人工确认）",
+					file, n.RenameStmt.RenameType.String(), n.RenameStmt.Relation.Relname)})
+		}
 	}
 	// IndexStmt/CreateSchemaStmt/CreateExtensionStmt/CreateSeqStmt/
 	// CreateFunctionStmt/DoStmt/TransactionStmt/InsertStmt/UpdateStmt/
@@ -128,6 +138,14 @@ func applyCreateTable(st *Structure, cs *pg_query.CreateStmt, src string, beg, e
 	// 重建语义：PG 回放里 CREATE TABLE 重建同名表 = 覆盖此前定义；
 	// IF NOT EXISTS 且表已存在 = no-op（保留既有结构与它的 ALTER 效果）。
 	if prev := st.findTable(t.Name); prev != nil {
+		if prev.Schema != t.Schema {
+			// 同库不同 schema 的重名表：语义模型 FQN（服务.库.表）
+			// 不含 schema，无法同时表达两张表——显式 warn 交人确认，
+			// 不静默覆盖（覆盖是确定性的，但必须被看见）。
+			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+				fmt.Sprintf("表 %s 同时出现在 schema %q 与 %q——语义模型 FQN 不含 schema，无法同时表达，后者（%q）覆盖前者",
+					t.Name, prev.Schema, t.Schema, t.Schema)})
+		}
 		if cs.IfNotExists {
 			return
 		}
@@ -164,11 +182,28 @@ func applyColumnConstraint(t *Table, columnName string, cn *pg_query.Node, findi
 		if len(cols) == 0 {
 			cols = []string{columnName}
 		}
+		pkCols := stringList(c.PkAttrs)
+		if len(pkCols) == 0 {
+			// REFERENCES u（未指定目标列）→ 引用目标主键，列对静态
+			// 不可知，on 条件留空（On() 返回 ""），显式提示人工补。
+			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+				fmt.Sprintf("列 %s.%s 的外键未指定目标列（引用 %s 主键），on 条件留空待人工补", t.Name, columnName, c.Pktable.Relname)})
+		}
+		// PG 对内联匿名外键自动命名 <表>_<列>_fkey：按同名登记，
+		// 后续 DROP CONSTRAINT <自动名> 才能撤掉引用边。
+		auto := t.Name + "_" + columnName + "_fkey"
+		t.addConstraint(auto, constraintState{
+			kind:         "fk",
+			targetSchema: fkSchema(c.Pktable),
+			targetTable:  c.Pktable.Relname,
+			cols:         cols,
+			pkCols:       pkCols,
+		})
 		t.References = append(t.References, &Reference{
 			TargetSchema: fkSchema(c.Pktable),
 			TargetTable:  c.Pktable.Relname,
 			Cols:         cols,
-			PkCols:       stringList(c.PkAttrs),
+			PkCols:       pkCols,
 		})
 	}
 }
@@ -192,6 +227,10 @@ func applyConstraint(t *Table, cn *pg_query.Constraint, findings *[]Finding) {
 			targetTable:  cn.Pktable.Relname,
 			cols:         stringList(cn.FkAttrs),
 			pkCols:       stringList(cn.PkAttrs),
+		}
+		if len(st.pkCols) == 0 {
+			*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+				fmt.Sprintf("约束 %s 的外键未指定目标列（引用 %s 主键），on 条件留空待人工补", cn.Conname, st.targetTable)})
 		}
 		t.addConstraint(cn.Conname, st)
 		t.References = append(t.References, &Reference{
@@ -315,15 +354,15 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 		case pg_query.AlterTableType_AT_AddColumn:
 			if cd := c.Def.GetColumnDef(); cd != nil {
 				col := &Column{Name: cd.Colname, Type: columnType(src, beg, end, cd)}
-				for _, c := range cd.Constraints {
-					applyColumnConstraint(t, col.Name, c, findings)
-				}
+				// 重名判断在前：ADD COLUMN IF NOT EXISTS 对已存在列
+				// 整体 no-op（列级约束不生效），不能先应用约束。
 				if t.findColumn(col.Name) != nil {
-					// ADD COLUMN 同名列已存在（IF NOT EXISTS 语义）——
-					// 保留原列（不覆盖类型，追加语义正确）。
 					*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
 						fmt.Sprintf("%s: ADD COLUMN %s.%s 重复（已存在，跳过）", file, t.Name, col.Name)})
 					continue
+				}
+				for _, cc := range cd.Constraints {
+					applyColumnConstraint(t, col.Name, cc, findings)
 				}
 				t.Columns = append(t.Columns, col)
 			}
@@ -347,10 +386,30 @@ func applyAlterTable(st *Structure, at *pg_query.AlterTableStmt, src string, beg
 			}
 		case pg_query.AlterTableType_AT_DropConstraint:
 			t.dropConstraint(c.Name)
+		default:
+			// 未处理的结构影响型子类型（RENAME COLUMN/TABLE、
+			// SET SCHEMA 等）静默跳过会让草稿与生产不一致——
+			// 显式 warn（与缺失目标表同模式），交人确认。
+			if !benignAlterSubtype(c.Subtype) {
+				*findings = append(*findings, Finding{SourceMigration, SeverityWarn,
+					fmt.Sprintf("%s: ALTER TABLE %s 的 %s 未处理（结构可能不完整，请人工确认）",
+						file, t.Name, c.Subtype.String())})
+			}
 		}
-		// AT_ColumnDefault/AT_DropNotNull/AT_SetNotNull/
-		// AT_ValidateConstraint 不进 YAML 模型，跳过。
 	}
+}
+
+// benignAlterSubtype 是进不了 YAML 模型的非结构影响型 ALTER 子类型
+// （默认值/NOT NULL/约束校验——NOT NULL 不在模型里，validate 不改结构）。
+func benignAlterSubtype(t pg_query.AlterTableType) bool {
+	switch t {
+	case pg_query.AlterTableType_AT_ColumnDefault,
+		pg_query.AlterTableType_AT_DropNotNull,
+		pg_query.AlterTableType_AT_SetNotNull,
+		pg_query.AlterTableType_AT_ValidateConstraint:
+		return true
+	}
+	return false
 }
 
 // columnType 从解析树 + 源文本提取列类型的作者原始写法。

@@ -31,7 +31,17 @@ type liveColumn struct {
 // schemas 是本次校准的 schema 清单（"" = public；草稿里每个表的
 // schema 去重后即为候选）。返回按（severity, message）排序的发现。
 func Calibrate(ctx context.Context, dsn string, st *Structure) ([]Finding, error) {
-	conn, err := pgx.Connect(ctx, dsn)
+	// 会话级只读强制：只读契约不能只依赖 DSN 角色——角色配错/未来
+	// 加写逻辑都会击穿「只报告不改」，连接参数兜底。
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("解析校准 DSN 失败: %w", err)
+	}
+	if cfg.RuntimeParams == nil {
+		cfg.RuntimeParams = map[string]string{}
+	}
+	cfg.RuntimeParams["default_transaction_read_only"] = "on"
+	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("连接校准库失败（请核对只读从库 DSN）: %w", err)
 	}
@@ -126,11 +136,12 @@ func introspect(ctx context.Context, conn *pgx.Conn) ([]liveTable, error) {
 		if err := rows.Scan(&schema, &table, &column, &typ, &charLen, &numPrec, &numScale); err != nil {
 			return nil, err
 		}
-		t, ok := byName[table]
+		key := qualKey(schema, table)
+		t, ok := byName[key]
 		if !ok {
 			t = &liveTable{Schema: schema, Name: table}
-			byName[table] = t
-			order = append(order, table)
+			byName[key] = t
+			order = append(order, key)
 		}
 		t.Columns = append(t.Columns, liveColumn{Name: column, Type: normalizeInfoSchemaType(typ, charLen, numPrec, numScale)})
 	}
@@ -139,8 +150,8 @@ func introspect(ctx context.Context, conn *pgx.Conn) ([]liveTable, error) {
 	}
 	sort.Strings(order)
 	out := make([]liveTable, 0, len(order))
-	for _, name := range order {
-		out = append(out, *byName[name])
+	for _, key := range order {
+		out = append(out, *byName[key])
 	}
 	return out, nil
 }
@@ -197,6 +208,9 @@ func draftTypeToInfoSchema(t string) string {
 		"timestamptz": "timestamp with time zone", "timestamp": "timestamp without time zone",
 		"timetz": "time with time zone", "time": "time without time zone",
 		"decimal": "numeric",
+		// serial 族：information_schema 报底层类型（bigint），
+		// 不归一的话每个自增主键都报假漂移。
+		"serial": "integer", "bigserial": "bigint", "smallserial": "smallint",
 	}
 	if v, ok := norm[base]; ok {
 		return v + mods

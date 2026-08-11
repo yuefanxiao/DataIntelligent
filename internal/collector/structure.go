@@ -54,7 +54,12 @@ type Reference struct {
 }
 
 // On 生成 join 条件（确定性：列对按外键声明顺序拼接）。
+// 列对不齐（REFERENCES 简写未指定目标列，PG 合法形态）时返回 ""
+// ——目标主键列静态不可知，留空由人工补（编译校验跳过空 on）。
 func (r *Reference) On(srcTable string) string {
+	if len(r.Cols) == 0 || len(r.Cols) != len(r.PkCols) {
+		return ""
+	}
 	out := ""
 	for i := range r.Cols {
 		if i > 0 {

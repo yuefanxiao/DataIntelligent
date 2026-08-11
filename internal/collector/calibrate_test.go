@@ -140,3 +140,14 @@ func TestNormalizeInfoSchemaType(t *testing.T) {
 		t.Errorf("timestamptz 归一 = %q", got)
 	}
 }
+
+// TestDraftTypeToInfoSchemaSerial serial 族归一（自增主键不报假漂移）。
+func TestDraftTypeToInfoSchemaSerial(t *testing.T) {
+	for in, want := range map[string]string{
+		"bigserial": "bigint", "serial": "integer", "smallserial": "smallint",
+	} {
+		if got := draftTypeToInfoSchema(in); got != want {
+			t.Errorf("draftTypeToInfoSchema(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -18,13 +18,29 @@ import (
 func CrossCheck(st *Structure, models []gormModel) []Finding {
 	var findings []Finding
 
-	// 模型表索引（表名 → 模型）。
+	// 模型表索引（表名 → 合并后的模型）：两个结构共用一个 TableName
+	// 是合法形态（不同用途的查询结构），列集取并集后只比对一次。
 	modelTables := map[string]*gormModel{}
 	var modelNames []string
 	for i := range models {
 		m := &models[i]
-		modelTables[m.Table] = m
-		modelNames = append(modelNames, m.Table)
+		agg, ok := modelTables[m.Table]
+		if !ok {
+			agg = &gormModel{Table: m.Table, Struct: m.Struct, Types: map[string]string{}}
+			modelTables[m.Table] = agg
+			modelNames = append(modelNames, m.Table)
+		} else {
+			agg.Struct += "+" + m.Struct
+		}
+		for _, c := range m.Columns {
+			if !containsStr(agg.Columns, c) {
+				agg.Columns = append(agg.Columns, c)
+			}
+			if t, ok := m.Types[c]; ok {
+				agg.Types[c] = t
+			}
+		}
+		sort.Strings(agg.Columns)
 	}
 
 	// 迁移表索引。
