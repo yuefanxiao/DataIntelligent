@@ -95,6 +95,20 @@ cases:
       status: rejected
       kind: permission_denied
       reason: not_granted
+  # 「错误区分无权限表」的另一面：语法层引用无法映射到授权 FQN（非 public
+  # schema）→ unknown_table，与 not_granted 机器可区分。
+  - id: neg-001c
+    name: 未授权表拒绝——无法映射 FQN 的引用区分 unknown_table
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "SELECT count(*) FROM bill.orders"
+      dbname: bill
+    expect:
+      status: rejected
+      kind: permission_denied
+      reason: unknown_table
 
   # ── §6.3 负向例 2：非 SELECT 拒绝（AST 分类拒绝集）─────────────────────
   - id: neg-002
@@ -117,8 +131,9 @@ cases:
       reason: non_select
 
   # ── §6.3 负向例 3：LIMIT 截断 ──────────────────────────────────────────
-  # trunc-001：默认上限 500（http 网关 DGW_SQL_LIMIT=500）；big_events 6000
-  # 行 → 500 行 + truncated。
+  # trunc-001：默认上限 500（http 网关不设 DGW_SQL_LIMIT，走 §4.9 默认
+  # 值路径）；big_events 6000 行 → 500 行 + truncated。psql 对照用有界
+  # 查询（LIMIT 500）——「返回的行与 psql 一致」。
   - id: trunc-001
     name: LIMIT 截断——>500 行结果截断 + truncated 标记（默认上限）
     modes: [http]
@@ -131,6 +146,7 @@ cases:
       status: success
       rows: 500
       truncated: true
+      psql_compare: true
   # trunc-002：硬上限 5000（stdio 网关 DGW_SQL_LIMIT=5000）；big_events
   # 6000 行 → 5000 行 + truncated（§4.9「硬上限 5000 不可配置超过」；
   # 配置边界 5001 拒启由 run.sh 环境检查验证）。
@@ -146,6 +162,7 @@ cases:
       status: success
       rows: 5000
       truncated: true
+      psql_compare: true
 
   # ── §6.3 负向例 4：并发超限（不排队、结构化拒绝）──────────────────────
   # 慢查询持闸 2s 保证窗口内确定性；被拒 = 闸在查询执行前（连校验都不做）。
@@ -163,6 +180,8 @@ cases:
         success: 2
         rejected: 1
       rejected_reason: key_concurrency_limit
+      # 不排队：被拒调用在闸处快速失败（毫秒级），远快于慢查询持闸 2s。
+      reject_within_ms: 1000
     replay_skip: true
   - id: conc-002
     name: 并发超限——进程级 >8 结构化拒绝（process_concurrency_limit，5 key × 2）
@@ -178,6 +197,7 @@ cases:
         success: 8
         rejected: 2
       rejected_reason: process_concurrency_limit
+      reject_within_ms: 1000
     replay_skip: true
 
   # ── §6.3 负向例 5：无指标原料路径 ─────────────────────────────────────

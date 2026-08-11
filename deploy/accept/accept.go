@@ -45,6 +45,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 )
 
@@ -71,18 +73,18 @@ type caseFile struct {
 }
 
 type Case struct {
-	ID          string            `yaml:"id"`
-	Name        string            `yaml:"name"`
-	Modes       []string          `yaml:"modes"`
-	Tool        string            `yaml:"tool"`
-	Args        map[string]any    `yaml:"args"`
-	Key         string            `yaml:"key"`
-	Keys        []string          `yaml:"keys"`
-	Concurrency int               `yaml:"concurrency"`
-	SQLs        []string          `yaml:"sqls"`
-	Steps       []Step            `yaml:"steps"`
-	Expect      Expect            `yaml:"expect"`
-	ReplaySkip  bool              `yaml:"replay_skip"`
+	ID          string         `yaml:"id"`
+	Name        string         `yaml:"name"`
+	Modes       []string       `yaml:"modes"`
+	Tool        string         `yaml:"tool"`
+	Args        map[string]any `yaml:"args"`
+	Key         string         `yaml:"key"`
+	Keys        []string       `yaml:"keys"`
+	Concurrency int            `yaml:"concurrency"`
+	SQLs        []string       `yaml:"sqls"`
+	Steps       []Step         `yaml:"steps"`
+	Expect      Expect         `yaml:"expect"`
+	ReplaySkip  bool           `yaml:"replay_skip"`
 }
 
 type Step struct {
@@ -93,15 +95,18 @@ type Step struct {
 }
 
 type Expect struct {
-	Status         string       `yaml:"status"`
-	Kind           string       `yaml:"kind"`
-	Reason         string       `yaml:"reason"`
-	Rows           *int         `yaml:"rows"`
-	Truncated      *bool        `yaml:"truncated"`
-	Paths          []PathAssert `yaml:"paths"`
-	PsqlCompare    bool         `yaml:"psql_compare"`
+	Status         string         `yaml:"status"`
+	Kind           string         `yaml:"kind"`
+	Reason         string         `yaml:"reason"`
+	Rows           *int           `yaml:"rows"`
+	Truncated      *bool          `yaml:"truncated"`
+	Paths          []PathAssert   `yaml:"paths"`
+	PsqlCompare    bool           `yaml:"psql_compare"`
 	StatusMultiset map[string]int `yaml:"status_multiset"`
-	RejectedReason string       `yaml:"rejected_reason"`
+	RejectedReason string         `yaml:"rejected_reason"`
+	// RejectWithinMS 并发用例的「不排队」断言：被拒调用往返耗时上限（毫秒；
+	// 缺省 0 = 不断言）。被拒 = 闸在查询执行前快速失败，不排队等待。
+	RejectWithinMS int64 `yaml:"reject_within_ms"`
 }
 
 type PathAssert struct {
@@ -128,12 +133,13 @@ type obs struct {
 	Tool         string
 	Params       map[string]any
 	Key          string
-	Status       string // success / rejected
+	Status       string // success / rejected（execrecord 状态常量）
 	Rows         *int
 	Truncated    *bool
 	RejectKind   string
 	RejectReason string
 	Text         string // 结果 text content（JSON 原文，断言/psql 对照用）
+	ElapsedMS    int64  // 调用往返耗时（并发「不排队」断言用）
 	CallErr      string // 客户端/协议层失败（非工具错误结果）
 }
 
@@ -191,6 +197,7 @@ func main() {
 	}
 }
 
+// parseKeys 解析 --keys 的 user=明文key 映射（逗号分隔；格式错误即配置错误）。
 func parseKeys(s string) map[string]string {
 	m := map[string]string{}
 	for _, pair := range strings.Split(s, ",") {
@@ -267,7 +274,7 @@ func run(cfg config) error {
 
 	// 三件套 (a)：psql 对照（psql_compare 断言）。
 	if len(cfg.psqlPrefix) > 0 {
-		report.addPsql(psqlCompareAll(cfg, cf, plans, obsList))
+		report.addPsql(psqlCompareAll(cfg, plans, obsList))
 	} else {
 		report.note("psql 对照未执行（未给 --psql-prefix）")
 	}
@@ -302,7 +309,7 @@ func buildPlans(cases []Case, mode string) []callPlan {
 	var plans []callPlan
 	for i := range cases {
 		c := &cases[i]
-		if !slicesContains(c.Modes, mode) {
+		if !slices.Contains(c.Modes, mode) {
 			continue
 		}
 		switch {
@@ -350,6 +357,7 @@ func buildPlans(cases []Case, mode string) []callPlan {
 	return plans
 }
 
+// keyOrDev 返回用例默认用户（未指定 key 时 = dev-alice，主用户）。
 func (c *Case) keyOrDev() string {
 	if c.Key != "" {
 		return c.Key
@@ -357,6 +365,7 @@ func (c *Case) keyOrDev() string {
 	return "dev-alice"
 }
 
+// cloneArgs 拷贝参数 map（sqls 逐句改写 sql 时不动用例原 args）。
 func cloneArgs(a map[string]any) map[string]any {
 	out := make(map[string]any, len(a))
 	for k, v := range a {
@@ -365,13 +374,17 @@ func cloneArgs(a map[string]any) map[string]any {
 	return out
 }
 
-func slicesContains(s []string, v string) bool {
-	for _, e := range s {
-		if e == v {
-			return true
-		}
+// collectGroup 收集从 i 开始的相邻同标签计划（并发组；buildPlans 保证
+// 组内相邻）：返回 (组, 组后下一索引)。三种执行/断言路径共用同一分组
+// 规则——观测与记录的分组边界永不漂移。
+func collectGroup(plans []callPlan, i int) ([]callPlan, int) {
+	p := &plans[i]
+	group := []callPlan{}
+	for i < len(plans) && plans[i].Label == p.Label {
+		group = append(group, plans[i])
+		i++
 	}
-	return false
+	return group, i
 }
 
 // ── 客户端 ──────────────────────────────────────────────────────────────
@@ -500,6 +513,7 @@ func (c *client) stdioSession(ctx context.Context) (*mcp.ClientSession, error) {
 	return s, nil
 }
 
+// close 关闭全部会话与 stdio 进程（defer 兜底；幂等）。
 func (c *client) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -513,6 +527,7 @@ func (c *client) close() {
 	}
 }
 
+// closeSessions 关闭一批临时会话（并发用例的独立会话）。
 func (c *client) closeSessions(ss []*mcp.ClientSession) {
 	for _, s := range ss {
 		_ = s.Close()
@@ -571,11 +586,8 @@ func executePlans(cfg config, cli *client, plans []callPlan) ([]obs, error) {
 		p := &plans[i]
 		if p.Skip {
 			// 并发组：收集相邻同标签计划，独立会话同时发出。
-			group := []callPlan{}
-			for i < len(plans) && plans[i].Label == p.Label {
-				group = append(group, plans[i])
-				i++
-			}
+			group, next := collectGroup(plans, i)
+			i = next
 			obsGroup, err := fireConcurrent(ctx, cfg, cli, group)
 			if err != nil {
 				return nil, err
@@ -602,29 +614,9 @@ func callOnce(ctx context.Context, cfg config, cli *client, p *callPlan) (obs, e
 	if err != nil {
 		return obs{}, err
 	}
+	start := time.Now()
 	res, err := s.CallTool(callCtx, &mcp.CallToolParams{Name: p.Tool, Arguments: p.Args})
-	o := obs{Label: p.Label, Tool: p.Tool, Params: p.Args, Key: p.Key}
-	if err != nil {
-		o.CallErr = err.Error()
-		return o, nil
-	}
-	o.Text = textContent(res)
-	if res.IsError {
-		o.Status = "rejected"
-		if e, ok := parseGwerr(o.Text); ok {
-			o.RejectKind = string(e.Kind)
-			if r, _ := e.Details["reason"].(string); r != "" {
-				o.RejectReason = r
-			}
-		}
-		return o, nil
-	}
-	o.Status = "success"
-	if sr, ok := parseSQLResult(o.Text); ok {
-		o.Rows = &sr.Meta.RowCount
-		o.Truncated = &sr.Meta.Truncated
-	}
-	return o, nil
+	return normalizeObs(p, res, err, time.Since(start).Milliseconds()), nil
 }
 
 // fireConcurrent 并发组：每个调用一个独立会话（按各自 key 绑定），同时
@@ -648,33 +640,40 @@ func fireConcurrent(ctx context.Context, cfg config, cli *client, group []callPl
 			defer wg.Done()
 			callCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
 			defer cancel()
+			start := time.Now()
 			res, err := sessions[i].CallTool(callCtx, &mcp.CallToolParams{Name: group[i].Tool, Arguments: group[i].Args})
-			o := obs{Label: group[i].Label, Tool: group[i].Tool, Params: group[i].Args, Key: group[i].Key}
-			if err != nil {
-				o.CallErr = err.Error()
-			} else {
-				o.Text = textContent(res)
-				if res.IsError {
-					o.Status = "rejected"
-					if e, ok := parseGwerr(o.Text); ok {
-						o.RejectKind = string(e.Kind)
-						if r, _ := e.Details["reason"].(string); r != "" {
-							o.RejectReason = r
-						}
-					}
-				} else {
-					o.Status = "success"
-					if sr, ok := parseSQLResult(o.Text); ok {
-						o.Rows = &sr.Meta.RowCount
-						o.Truncated = &sr.Meta.Truncated
-					}
-				}
-			}
-			results[i] = o
+			results[i] = normalizeObs(&group[i], res, err, time.Since(start).Milliseconds())
 		}(i)
 	}
 	wg.Wait()
 	return results, nil
+}
+
+// normalizeObs 把一次 CallTool 的结果归一为观测（顺序/并发两条执行路径
+// 共用同一归一化，观测与记录的对照基准永不漂移）。
+func normalizeObs(p *callPlan, res *mcp.CallToolResult, callErr error, elapsedMS int64) obs {
+	o := obs{Label: p.Label, Tool: p.Tool, Params: p.Args, Key: p.Key, ElapsedMS: elapsedMS}
+	if callErr != nil {
+		o.CallErr = callErr.Error()
+		return o
+	}
+	o.Text = textContent(res)
+	if res.IsError {
+		o.Status = execrecord.StatusRejected
+		if e, ok := parseGwerr(o.Text); ok {
+			o.RejectKind = string(e.Kind)
+			if r, _ := e.Details["reason"].(string); r != "" {
+				o.RejectReason = r
+			}
+		}
+		return o
+	}
+	o.Status = execrecord.StatusSuccess
+	if sr, ok := parseSQLResult(o.Text); ok {
+		o.Rows = &sr.Meta.RowCount
+		o.Truncated = &sr.Meta.Truncated
+	}
+	return o
 }
 
 // ── 结果解析（外部行为侧）──────────────────────────────────────────────
@@ -715,6 +714,8 @@ type sqlColumn struct {
 	Type string `json:"type"`
 }
 
+// parseSQLResult 解析 execute_sql 结果（UseNumber 保数值精度）；非
+// SQL 结果（缺 columns）返回 false——语义工具结果不会误判成 0 行成功。
 func parseSQLResult(s string) (*sqlResult, bool) {
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
@@ -746,11 +747,8 @@ func assertPlans(plans []callPlan, obsList []obs) []caseResult {
 		p := &plans[i]
 		if p.Skip {
 			// 并发组：收集全部观测，多集断言。
-			group := []callPlan{}
-			for i < len(plans) && plans[i].Label == p.Label {
-				group = append(group, plans[i])
-				i++
-			}
+			group, next := collectGroup(plans, i)
+			i = next
 			o := obsList[:len(group)]
 			obsList = obsList[len(group):]
 			results = append(results, assertConcurrentGroup(group[0].Label, group, o))
@@ -818,26 +816,33 @@ func assertCall(p *callPlan, o obs) caseResult {
 }
 
 // assertConcurrentGroup 并发组多集断言：{success: n, rejected: m} + 被拒
-// 调用统一 reason（不排队、快速失败）。
+// 调用统一 reason + 被拒耗时上限（不排队、快速失败；reject_within_ms
+// 缺省不断言）。
 func assertConcurrentGroup(label string, plans []callPlan, obs []obs) caseResult {
 	r := caseResult{Label: label, Pass: true}
 	counts := map[string]int{}
 	var reasons []string
+	e := plans[0].Expect
 	for _, o := range obs {
 		counts[o.Status]++
-		if o.Status == "rejected" {
-			reasons = append(reasons, o.RejectReason)
-			if o.RejectKind != "rate_limited" {
-				r.Pass = false
-				r.Detail = fmt.Sprintf("被拒 kind=%s（期望 rate_limited）", o.RejectKind)
-			}
-		}
 		if o.CallErr != "" {
 			r.Pass = false
 			r.Detail = "调用失败: " + o.CallErr
 		}
+		if o.Status == execrecord.StatusRejected {
+			reasons = append(reasons, o.RejectReason)
+			if o.RejectKind != string(gwerr.KindRateLimited) {
+				r.Pass = false
+				r.Detail = fmt.Sprintf("被拒 kind=%s（期望 %s）", o.RejectKind, gwerr.KindRateLimited)
+			}
+			// 不排队：被拒调用在闸处快速失败（远快于慢查询持闸时长），
+			// 排队实现会让被拒调用等到窗口期结束。
+			if e.RejectWithinMS > 0 && o.ElapsedMS > e.RejectWithinMS {
+				r.Pass = false
+				r.Detail = fmt.Sprintf("被拒调用耗时 %dms（上限 %dms，疑似排队）", o.ElapsedMS, e.RejectWithinMS)
+			}
+		}
 	}
-	e := plans[0].Expect
 	if e.StatusMultiset != nil {
 		for status, want := range e.StatusMultiset {
 			if counts[status] != want {
@@ -855,11 +860,12 @@ func assertConcurrentGroup(label string, plans []callPlan, obs []obs) caseResult
 		}
 	}
 	if r.Pass {
-		r.Detail = fmt.Sprintf("%d 成功 + %d 拒绝（%s）", counts["success"], counts["rejected"], e.RejectedReason)
+		r.Detail = fmt.Sprintf("%d 成功 + %d 拒绝（%s）", counts[execrecord.StatusSuccess], counts[execrecord.StatusRejected], e.RejectedReason)
 	}
 	return r
 }
 
+// detailOf 组装成功观测的展示详情。
 func detailOf(o obs) string {
 	if o.Rows != nil && o.Truncated != nil {
 		return fmt.Sprintf("rows=%d truncated=%v", *o.Rows, *o.Truncated)
@@ -959,9 +965,10 @@ type psqlResult struct {
 }
 
 // psqlCompareAll 对 psql_compare 断言的观测逐项执行 psql 同库同 SQL 对照。
-func psqlCompareAll(cfg config, cf *caseFile, plans []callPlan, obsList []obs) []psqlResult {
-	// 声明 psql_compare 的调用标签集（从用例文件回查，harness 不内嵌业务
-	// 断言；并发/被拒调用没有该断言）。
+// 声明集从计划回查（用例文件 → 计划，harness 不内嵌业务断言；并发/被拒
+// 调用没有该断言）。
+func psqlCompareAll(cfg config, plans []callPlan, obsList []obs) []psqlResult {
+	// 声明 psql_compare 的调用标签集。
 	want := map[string]bool{}
 	for _, p := range plans {
 		if p.Expect.PsqlCompare {
@@ -971,12 +978,11 @@ func psqlCompareAll(cfg config, cf *caseFile, plans []callPlan, obsList []obs) [
 	var out []psqlResult
 	for i := range obsList {
 		o := &obsList[i]
-		if o.Tool != "execute_sql" || o.Status != "success" || !want[o.Label] {
+		if o.Tool != "execute_sql" || o.Status != execrecord.StatusSuccess || !want[o.Label] {
 			continue
 		}
 		out = append(out, psqlCompareOne(cfg, o))
 	}
-	_ = cf
 	return out
 }
 
@@ -988,14 +994,21 @@ func psqlCompareOne(cfg config, o *obs) psqlResult {
 		r.Detail = "用例无 dbname，无法选对照库"
 		return r
 	}
-	psqlRows, err := runPSQL(cfg, dbname, sql)
-	if err != nil {
-		r.Detail = err.Error()
-		return r
-	}
 	res, ok := parseSQLResult(o.Text)
 	if !ok {
 		r.Detail = "网关结果 JSON 解析失败"
+		return r
+	}
+	// 截断用例（truncated=true）：网关返回前 row_count 行——psql 侧用
+	// 同样的有界查询（LIMIT row_count）对照「返回的行与 psql 一致」；
+	// 未截断用例直接同 SQL 全量对照。
+	psqlSQL := sql
+	if res.Meta.Truncated {
+		psqlSQL = fmt.Sprintf("SELECT * FROM (%s) _q LIMIT %d", strings.TrimSuffix(strings.TrimSpace(sql), ";"), res.Meta.RowCount)
+	}
+	psqlRows, err := runPSQL(cfg, dbname, psqlSQL)
+	if err != nil {
+		r.Detail = err.Error()
 		return r
 	}
 	if len(psqlRows) != len(res.Rows) {
@@ -1142,6 +1155,7 @@ func compareCell(colType, psql string, gw any) string {
 	}
 }
 
+// jsonInt64 把 JSON 数字值转 int64（整数列对照用）。
 func jsonInt64(v any) (int64, error) {
 	n, ok := v.(json.Number)
 	if !ok {
@@ -1150,6 +1164,7 @@ func jsonInt64(v any) (int64, error) {
 	return n.Int64()
 }
 
+// ratOf 把 JSON 数字/文本转 big.Rat（numeric 精确对照用）。
 func ratOf(v any) (*big.Rat, bool) {
 	switch x := v.(type) {
 	case json.Number:
@@ -1170,6 +1185,7 @@ func jsonSemanticEqual(a, b string) bool {
 	return jsonEqual(va, vb)
 }
 
+// jsonEqual 递归比较解码后的 JSON 值（map/数组逐项，标量序列化比较）。
 func jsonEqual(a, b any) bool {
 	switch av := a.(type) {
 	case map[string]any:
@@ -1226,20 +1242,12 @@ func parsePSQLTime(s string) (time.Time, error) {
 
 // ── 三件套 (b)/(c)：JSONL ──────────────────────────────────────────────
 
-// jsonlRecord 是执行记录 JSONL 一行的最小形状（字段契约见
-// internal/execrecord；只读侧解析，字段平铺与写入侧一致）。
+// jsonlRecord 是执行记录 JSONL 一行的读取侧形状：kind 分派 + 复用写入侧
+// ToolCall 字段契约（internal/execrecord）——读取与写入共用同一类型，
+// 字段清单永不漂移（含 plan_id/rows/truncated/reject 全契约）。
 type jsonlRecord struct {
-	Kind     string           `json:"kind"`
-	TS       time.Time        `json:"ts"`
-	User     string           `json:"user"`
-	Key      string           `json:"key"`
-	Tool     string           `json:"tool"`
-	Params   map[string]any   `json:"params"`
-	StagesMS map[string]int64 `json:"stages_ms"`
-	Status   string           `json:"status"`
-	Rows     *int             `json:"rows"`
-	Truncated *bool           `json:"truncated"`
-	Reject   *gwerr.Error     `json:"reject"`
+	Kind string `json:"kind"`
+	execrecord.ToolCall
 }
 
 // readJSONLAll 读目录全部 raw-*.jsonl 的全部记录（tool_call / auth_failure /
@@ -1344,7 +1352,7 @@ func readReplayChain(path string) ([]jsonlRecord, error) {
 func toolCallRecords(all []jsonlRecord) []jsonlRecord {
 	var chain []jsonlRecord
 	for _, r := range all {
-		if r.Kind == "tool_call" {
+		if r.Kind == execrecord.KindToolCall {
 			chain = append(chain, r)
 		}
 	}
@@ -1374,7 +1382,7 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 
 	// (c) 预扫：auth_failure 不允许出现（认证全程成功）。
 	for _, rec := range all {
-		if rec.Kind == "auth_failure" {
+		if rec.Kind == execrecord.KindAuthFailure {
 			fails = append(fails, "出现 auth_failure 记录（预期零认证失败）")
 		}
 	}
@@ -1387,11 +1395,8 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 		p := &plans[i]
 		exp := expectedPermDenied(p)
 		if p.Skip {
-			group := []callPlan{}
-			for i < len(plans) && plans[i].Label == p.Label {
-				group = append(group, plans[i])
-				i++
-			}
+			group, next := collectGroup(plans, i)
+			i = next
 			o := obsList[:len(group)]
 			obsList = obsList[len(group):]
 			need := len(group)
@@ -1435,18 +1440,18 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 	for _, rec := range chain {
 		c.ByStatus[rec.Status]++
 		switch rec.Status {
-		case "success":
+		case execrecord.StatusSuccess:
 			if rec.Reject != nil {
 				fails = append(fails, "success 记录带 reject（记录矛盾）")
 			}
 			if rec.Tool == "execute_sql" && (rec.Rows == nil || rec.Truncated == nil) {
 				fails = append(fails, "execute_sql success 记录缺 rows/truncated")
 			}
-		case "rejected":
+		case execrecord.StatusRejected:
 			if rec.Reject == nil || rec.Reject.Kind == "" {
 				fails = append(fails, "被拒记录缺原因（reject 为空）")
 			}
-			if rec.Reject != nil && rec.Reject.Kind == "permission_denied" {
+			if rec.Reject != nil && rec.Reject.Kind == gwerr.KindPermission {
 				permDenied++
 			}
 		default:
@@ -1472,30 +1477,33 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 	return c
 }
 
+// expectedPermDenied 该调用的预期 permission_denied 次数（0/1；(c) 的
+// 精确计数依据——零未授权访问 = 只出现在预期负向例上）。
 func expectedPermDenied(p *callPlan) int {
-	if p.Expect.Kind == "permission_denied" {
+	if p.Expect.Kind == string(gwerr.KindPermission) {
 		return 1
 	}
 	return 0
 }
 
-// matchRecord 单条记录 ↔ 观测对照。
+// matchRecord 单条记录 ↔ 观测对照（工具/身份/参数/状态/行数/原因逐项）。
 func matchRecord(rec jsonlRecord, o obs) bool {
+	params, _ := rec.Params.(map[string]any)
 	if rec.Tool != o.Tool || rec.User != o.Key || rec.Status != o.Status {
 		return false
 	}
-	if !canonEqual(rec.Params, o.Params) {
+	if !canonEqual(params, o.Params) {
 		return false
 	}
 	switch o.Status {
-	case "success":
+	case execrecord.StatusSuccess:
 		if o.Rows != nil && (rec.Rows == nil || *rec.Rows != *o.Rows) {
 			return false
 		}
 		if o.Truncated != nil && (rec.Truncated == nil || *rec.Truncated != *o.Truncated) {
 			return false
 		}
-	case "rejected":
+	case execrecord.StatusRejected:
 		if rec.Reject == nil || rec.Reject.Kind != gwerr.Kind(o.RejectKind) {
 			return false
 		}
@@ -1561,12 +1569,13 @@ func runReplay(cfg config, cf *caseFile, report *report) error {
 	replayed, skipped := 0, 0
 	for i := range chain {
 		rec := &chain[i]
-		if _, skip := skipSet[canonOf(rec.Tool, rec.Params)]; skip {
+		params, _ := rec.Params.(map[string]any)
+		if _, skip := skipSet[canonOf(rec.Tool, rec.User, params)]; skip {
 			skipped++
 			results = append(results, caseResult{Label: fmt.Sprintf("replay#%d", i+1), Name: rec.Tool, Pass: true, Detail: "跳过（并发用例，顺序重放不可复现）"})
 			continue
 		}
-		p := &callPlan{Tool: rec.Tool, Args: rec.Params, Key: rec.User}
+		p := &callPlan{Tool: rec.Tool, Args: params, Key: rec.User}
 		o, err := callOnce(ctx, cfg, cli, p)
 		if err != nil {
 			return err
@@ -1581,7 +1590,7 @@ func runReplay(cfg config, cf *caseFile, report *report) error {
 			if o.Status != rec.Status {
 				fails = append(fails, fmt.Sprintf("status=%s（记录 %s）", o.Status, rec.Status))
 			}
-			if o.Status == "success" && rec.Status == "success" {
+			if o.Status == execrecord.StatusSuccess && rec.Status == execrecord.StatusSuccess {
 				if o.Tool == "execute_sql" {
 					if rec.Rows != nil && (o.Rows == nil || *o.Rows != *rec.Rows) {
 						fails = append(fails, fmt.Sprintf("rows=%v（记录 %d）", o.Rows, *rec.Rows))
@@ -1591,9 +1600,16 @@ func runReplay(cfg config, cf *caseFile, report *report) error {
 					}
 				}
 			}
-			if o.Status == "rejected" && rec.Status == "rejected" {
-				if rec.Reject != nil && o.RejectKind != string(rec.Reject.Kind) {
-					fails = append(fails, fmt.Sprintf("kind=%s（记录 %s）", o.RejectKind, rec.Reject.Kind))
+			if o.Status == execrecord.StatusRejected && rec.Status == execrecord.StatusRejected {
+				if rec.Reject != nil {
+					if o.RejectKind != string(rec.Reject.Kind) {
+						fails = append(fails, fmt.Sprintf("kind=%s（记录 %s）", o.RejectKind, rec.Reject.Kind))
+					}
+					// 被拒原因如实：details.reason 也要复现（主运行对照同一
+					// 精度；如 unknown_table vs not_granted 不可互替）。
+					if r, _ := rec.Reject.Details["reason"].(string); r != "" && o.RejectReason != r {
+						fails = append(fails, fmt.Sprintf("reason=%s（记录 %s）", o.RejectReason, r))
+					}
 				}
 			}
 			if len(fails) > 0 {
@@ -1612,40 +1628,45 @@ func runReplay(cfg config, cf *caseFile, report *report) error {
 	return nil
 }
 
-// replaySkipSet 收集 replay_skip 用例的 (tool, params) 规范化键。
+// replaySkipSet 收集 replay_skip 用例的 (tool, user, params) 规范化键：
+// 用户入键避免「不同用例同参数」误跳过（并发探测用例的用户/参数组合
+// 是唯一的）。
 func replaySkipSet(cases []Case, mode string) map[string]bool {
 	set := map[string]bool{}
 	for _, p := range buildPlans(cases, mode) {
 		if p.Skip {
-			set[canonOf(p.Tool, p.Args)] = true
+			set[canonOf(p.Tool, p.Key, p.Args)] = true
 		}
 	}
 	return set
 }
 
-func canonOf(tool string, args map[string]any) string {
+// canonOf 生成 (tool, user, params) 的规范化键（map JSON 序列化，键序稳定）。
+func canonOf(tool, user string, args map[string]any) string {
 	b, _ := json.Marshal(args)
-	return tool + "|" + string(b)
+	return tool + "|" + user + "|" + string(b)
 }
 
 // ── 报告 ────────────────────────────────────────────────────────────────
 
 type report struct {
-	cfg     config
-	gitSHA  string
-	lines   []string
-	results []caseResult
-	psql    []psqlResult
-	jsonl   *jsonlCheck
-	replay  []caseResult
+	cfg                           config
+	gitSHA                        string
+	lines                         []string
+	results                       []caseResult
+	psql                          []psqlResult
+	jsonl                         *jsonlCheck
+	replay                        []caseResult
 	replayReplayed, replaySkipped int
-	notes   []string
+	notes                         []string
 }
 
+// newReport 构造报告（记录 git 短 sha 供留档溯源）。
 func newReport(cfg config) *report {
 	return &report{cfg: cfg, gitSHA: gitSHA()}
 }
 
+// gitSHA 返回当前提交短 sha（报告溯源；非 git 环境 = unknown）。
 func gitSHA() string {
 	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
 		return strings.TrimSpace(string(out))
@@ -1806,6 +1827,7 @@ func (r *report) write(path string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
+// psqlAllPass 汇总 (a) 判定：psql 对照全部一致。
 func (r *report) psqlAllPass() bool {
 	for _, p := range r.psql {
 		if !p.Pass {
@@ -1815,6 +1837,7 @@ func (r *report) psqlAllPass() bool {
 	return true
 }
 
+// psqlDetail 组装 (a) 的通过数摘要。
 func (r *report) psqlDetail() string {
 	pass := 0
 	for _, p := range r.psql {

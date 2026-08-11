@@ -2,15 +2,20 @@
 # 验收重放编排（v1 build 12；spec §5 测试决策主 seam / §6.3 负向边界 5 例 /
 # §6.4 判定三件套 / §6.5 执行方式）。
 #
+# 注：shebang 用 bash 而非仓库惯例的 sh——需要进程替换
+# `exec > >(tee -a "$RUN_LOG")` 做全程转写留档（sh 无此能力）；脚本其余
+# 部分保持 sh 兼容写法。
+#
 #   1. 起 demo 主从 PG（独立 compose project dgw-accept，与 demo 栈隔离）
 #   2. 主库建 bill/iam 库 + 演示表/数据（orders 600 / big_events 6000 /
 #      iam.users），跑真实 provisioning（readonly-role.sql）
 #   3. 从库 WAL 追平后，构建 dgw + accept 二进制
 #   4. 凭据/授权（dev-alice 主用户 / ghost 无 grants 用户 / p1-p5 并发探测）
 #   5. 硬上限配置边界检查（DGW_SQL_LIMIT=5001 应拒启）
-#   6. 网关拉起（HTTP 限 500 / stdio 限 5000 双形态）→ harness 用例按序
-#      重放 → 判定三件套断言 → 报告留档（deploy/accept/reports/）
-#   7. 每形态重放复现（JSONL 调用链从头重放 → 同状态同行数）
+#   6. 网关拉起（HTTP 不设 DGW_SQL_LIMIT 走 §4.9 默认 500 / stdio 限 5000
+#      双形态）→ harness 用例按序重放 → 判定三件套断言 → 报告留档
+#      （deploy/accept/reports/）
+#   7. 每形态重放复现（chain 快照从头重放 → 同状态同行数）
 #
 # 依赖：docker、go、curl。PG 镜像拉不下来时可用
 #   DGW_PG_REGISTRY=docker.1ms.run/library 覆盖（测试环境镜像源）。
@@ -130,15 +135,24 @@ echo "    用户：dev-alice（主）/ ghost（无 grants）/ p1-p5（并发探�
 KEYS="dev-alice=$KEY_MAIN,ghost=$KEY_GHOST,p1=$KEY_P1,p2=$KEY_P2,p3=$KEY_P3,p4=$KEY_P4,p5=$KEY_P5"
 
 echo "==> [6/9] 硬上限配置边界（DGW_SQL_LIMIT=5001 应拒启，§4.9）..."
-if DGW_SQL_LIMIT=5001 DGW_PG_DATABASES="$PG_ROUTES" DGW_PG_STATEMENT_TIMEOUT_MS=30000 \
-   "$DGWBIN" serve --db "$TMP/dgw.db" --addr "127.0.0.1:$((HTTP_PORT + 1))" 2>&1 | grep -q "越界"; then
+# 后台探测 + 超时兜底：若 5001 未拒启（serve 一直在监听），10s 后杀掉并判败，
+# 不因管道等待挂死整轮验收。
+DGW_SQL_LIMIT=5001 DGW_PG_DATABASES="$PG_ROUTES" DGW_PG_STATEMENT_TIMEOUT_MS=30000 \
+  "$DGWBIN" serve --db "$TMP/dgw.db" --addr "127.0.0.1:$((HTTP_PORT + 1))" >"$TMP/gw-5001.log" 2>&1 &
+P5001=$!
+i=0
+while kill -0 "$P5001" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+if kill -0 "$P5001" 2>/dev/null; then
+  kill "$P5001" 2>/dev/null || true
+  fail "5001 未拒启（硬上限配置边界失效，serve 仍在监听）"
+elif grep -q "越界" "$TMP/gw-5001.log"; then
   echo "    ✅ 5001 拒启（行数上限越界 → 配置错误 fail fast）"
 else
-  fail "5001 未拒启（硬上限配置边界失效）"
+  fail "5001 拒启原因不符（日志无「越界」）"
 fi
 
-echo "==> [7/9] HTTP 形态：网关拉起（限 500）+ 用例重放 + 三件套 + 重放复现..."
-DGW_PG_DATABASES="$PG_ROUTES" DGW_SQL_LIMIT=500 DGW_PG_STATEMENT_TIMEOUT_MS=30000 \
+echo "==> [7/9] HTTP 形态：网关拉起（不设 DGW_SQL_LIMIT，§4.9 默认 500）+ 用例重放 + 三件套 + 重放复现..."
+DGW_PG_DATABASES="$PG_ROUTES" DGW_PG_STATEMENT_TIMEOUT_MS=30000 \
   DGW_EXEC_LOG_DIR="$TMP/logs" DGW_EXEC_RAW_RETENTION_DAYS=7 DGW_EXEC_SUMMARY_RETENTION_DAYS=30 \
   "$DGWBIN" serve --db "$TMP/dgw.db" --addr "$HTTP_ADDR" >"$TMP/gw-http.log" 2>&1 &
 GW_PID=$!

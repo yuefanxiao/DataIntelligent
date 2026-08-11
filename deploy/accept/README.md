@@ -38,18 +38,24 @@ cd deploy/accept
 
 | 判定 | 实现 |
 |---|---|
-| (a) 数字一致 | `psql_compare` 用例：结果与 psql 同库同 SQL（同一共享只读角色、同一从库）逐项一致——按列类型归一化（int/numeric/text/timestamptz/bool/uuid/json…） |
-| (b) 执行记录可复现 | 网关 JSONL 完整记录整条调用链（工具/参数/耗时/状态/行数）与 harness 观测逐调用对照；`--replay-from` 形态从 JSONL 读调用链、新会话从头重放 → 同状态同行数 |
+| (a) 数字一致 | `psql_compare` 用例：结果与 psql 同库同 SQL（同一共享只读角色、同一从库）逐项一致——按列类型归一化（int/numeric/text/timestamptz/bool/uuid/json…）；截断用例用同样的有界查询（LIMIT row_count）对照「返回的行与 psql 一致」 |
+| (b) 执行记录可复现 | 网关 JSONL 完整记录整条调用链（工具/参数/耗时/状态/行数）与 harness 观测逐调用对照；chain 快照（`<报告>.chain.jsonl`）从头重放 → 同状态同行数同原因 |
 | (c) 零未授权访问 | 全程无 auth_failure；被拒记录原因如实（reject 非空）；`permission_denied` 只出现在预期负向例上（数量精确） |
+
+**（b）的已知边界**：执行记录字段契约（execrecord.ToolCall）不含语义
+工具的结果内容（search_entities 的 hits 等）——重放对语义工具记录只
+复现状态（主运行断言仍逐项校验结果）；并发用例的拒绝依赖时间窗口，
+顺序重放不可复现，标记 `replay_skip` 跳过状态比对（执行记录仍在链上，
+完整性照查）。
 
 ## 负向/边界 5 例（spec §6.3）
 
 | 用例 | 断言 |
 |---|---|
-| `neg-001a/b` 未授权表拒绝 | ghost（无 grants）与 dev-alice（有角色读权无表授权）→ `permission_denied`/`not_granted`（错误区分「无权限表」） |
+| `neg-001a/b/c` 未授权表拒绝 | ghost（无 grants）/ dev-alice（有角色读权无表授权）→ `permission_denied`/`not_granted`；非 public schema 引用 → `unknown_table`——「无权限表」的两种形态机器可区分 |
 | `neg-002` 非 SELECT 拒绝 | DML/DDL/COPY/utility 六句 → `invalid_request`/`non_select`（AST 分类拒绝） |
-| `trunc-001/002` LIMIT 截断 | >500 截断（限 500 形态）+ >5000 硬上限（限 5000 形态）+ truncated 标记；配置 5001 拒启 |
-| `conc-001/002` 并发超限 | 同 key >2 / 进程级 >8 → `rate_limited`（key/process_concurrency_limit），不排队快速失败（慢查询持闸 2s 保证窗口内确定性） |
+| `trunc-001/002` LIMIT 截断 | >500 截断（HTTP 网关不设 DGW_SQL_LIMIT，走 §4.9 默认值路径）+ >5000 硬上限（stdio 限 5000）+ truncated 标记 + 有界查询 psql 对照；配置 5001 拒启 |
+| `conc-001/002` 并发超限 | 同 key >2 / 进程级 >8 → `rate_limited`（key/process_concurrency_limit），不排队快速失败（`reject_within_ms` 断言被拒调用毫秒级返回；慢查询持闸 2s 保证窗口内确定性） |
 | `neg-005` 无指标原料路径 | 无现成指标（search 零命中）→ 走表/列原料路径直查成功产出结果 |
 
 ## 形态覆盖
