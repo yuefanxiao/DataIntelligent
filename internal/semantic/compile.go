@@ -10,6 +10,11 @@ import (
 //
 // 编译是纯函数（输入 rawInput，输出 Target）：同输入同输出（§5.3 seam 的
 // 确定性前提）；不触库、不触网。
+//
+// 两遍编译（对抗评审修复）：一遍登记全部实体（服务→库→表→列→指标→概念），
+// 引用只记录不校验；二遍统一校验引用完整性并落关系边——解除「引用指向编译
+// 顺序在后的实体被误判缺失」的顺序依赖（跨服务 references 是核心建模能力，
+// 不应受服务文件名排序影响）。
 func Compile(in *rawInput) (*Target, error) {
 	c := &compiler{entities: map[string]Entity{}}
 	for _, sf := range in.services {
@@ -27,6 +32,9 @@ func Compile(in *rawInput) (*Target, error) {
 			return nil, err
 		}
 	}
+	if err := c.resolveRefs(); err != nil {
+		return nil, err
+	}
 	t := &Target{
 		Entities:  c.order,
 		Relations: c.relations,
@@ -40,6 +48,19 @@ type compiler struct {
 	order     []Entity          // 编译顺序（服务→库→表→列→指标→概念），diff 展示稳定
 	relations []Relation
 	enums     []EnumValue
+	// 二遍校验的待检引用（references + 指标 tables 要 KindTable；
+	// 概念 describes 允许 table/column/metric，分两列）。
+	pendingTableRefs []pendingRef
+	pendingDescribes []pendingRef
+}
+
+// pendingRef 是一条待二遍校验的引用：目标存在 + 类型符合才落关系边。
+type pendingRef struct {
+	what   string // 引用方描述（错误信息用）
+	src    string // 边起点
+	target string // 被引用实体 FQN
+	typ    RelationType
+	meta   string
 }
 
 func (c *compiler) addEntity(e Entity) error {
@@ -56,14 +77,30 @@ func (c *compiler) addRelation(t RelationType, src, dst, meta string) {
 	c.relations = append(c.relations, Relation{Type: t, SrcFQN: src, DstFQN: dst, Meta: meta})
 }
 
-// require 校验实体存在且 kind 符合预期；缺失 = 引用完整性错误。
-func (c *compiler) require(fqn string, want Kind, what string) error {
-	e, ok := c.entities[fqn]
-	if !ok {
-		return fmt.Errorf("%w: %s 引用 %q 不存在（引用完整性校验）", ErrRefMissing, what, fqn)
+// resolveRefs 是二遍校验：全部实体登记完成后，统一校验引用完整性并落关系
+// 边。任一引用缺失/类型不符 = 编译错误（原子拒绝，零写库）。
+func (c *compiler) resolveRefs() error {
+	for _, p := range c.pendingTableRefs {
+		e, ok := c.entities[p.target]
+		if !ok {
+			return fmt.Errorf("%w: %s 引用 %q 不存在（引用完整性校验）", ErrRefMissing, p.what, p.target)
+		}
+		if e.Kind != KindTable {
+			return fmt.Errorf("%s 引用 %q：类型是 %s，需要 %s", p.what, p.target, e.Kind, KindTable)
+		}
+		c.addRelation(p.typ, p.src, p.target, p.meta)
 	}
-	if e.Kind != want {
-		return fmt.Errorf("%s 引用 %q：类型是 %s，需要 %s", what, fqn, e.Kind, want)
+	for _, p := range c.pendingDescribes {
+		e, ok := c.entities[p.target]
+		if !ok {
+			return fmt.Errorf("%w: %s 引用 %q 不存在（引用完整性校验）", ErrRefMissing, p.what, p.target)
+		}
+		switch e.Kind {
+		case KindTable, KindColumn, KindMetric:
+		default:
+			return fmt.Errorf("%s 引用 %q：类型是 %s，需要 table/column/metric", p.what, p.target, e.Kind)
+		}
+		c.addRelation(p.typ, p.src, p.target, p.meta)
 	}
 	return nil
 }
@@ -112,9 +149,6 @@ func (c *compiler) compileTable(service, dbName string, tbl tableDef) error {
 		}
 	}
 	for _, ref := range tbl.References {
-		if err := c.require(ref.To, KindTable, fmt.Sprintf("表 %s 的 references", tblFQN)); err != nil {
-			return err
-		}
 		// join 条件（on 子句）也是 SQL 片段：坏条件在运行时才炸 = 口径
 		// 校验缺口，编译期同样探针（review 修复）。
 		if strings.TrimSpace(ref.On) != "" {
@@ -123,7 +157,14 @@ func (c *compiler) compileTable(service, dbName string, tbl tableDef) error {
 				return fmt.Errorf("表 %s 的 references on 条件不可解析: %w", tblFQN, err)
 			}
 		}
-		c.addRelation(RelReferences, tblFQN, ref.To, ref.On)
+		// 引用目标存在性 = 二遍校验（references 可指向编译顺序在后的表）。
+		c.pendingTableRefs = append(c.pendingTableRefs, pendingRef{
+			what:   fmt.Sprintf("表 %s 的 references", tblFQN),
+			src:    tblFQN,
+			target: ref.To,
+			typ:    RelReferences,
+			meta:   ref.On,
+		})
 	}
 	return nil
 }
@@ -187,11 +228,14 @@ func (c *compiler) compileMetric(m metricDef) error {
 		return err
 	}
 	for _, tbl := range m.Tables {
-		if err := c.require(tbl, KindTable, fmt.Sprintf("指标 %s 的 tables", m.Name)); err != nil {
-			return err
-		}
-		// 指标→依赖表 = describes 边（授权展开依据：指标授权 → 底层表授权）。
-		c.addRelation(RelDescribes, m.Name, tbl, "")
+		// 指标→依赖表 = describes 边（授权展开依据：指标授权 → 底层表授权）；
+		// 目标存在性 = 二遍校验。
+		c.pendingTableRefs = append(c.pendingTableRefs, pendingRef{
+			what:   fmt.Sprintf("指标 %s 的 tables", m.Name),
+			src:    m.Name,
+			target: tbl,
+			typ:    RelDescribes,
+		})
 	}
 	return nil
 }
@@ -231,24 +275,13 @@ func (c *compiler) compileConcept(cpt conceptDef) error {
 		return err
 	}
 	for _, target := range cpt.Describes {
-		if err := c.requireDescribes(cpt.Name, target); err != nil {
-			return err
-		}
-		c.addRelation(RelDescribes, cpt.Name, target, "")
+		// describes 边目标存在性/类型（table/column/metric）= 二遍校验。
+		c.pendingDescribes = append(c.pendingDescribes, pendingRef{
+			what:   fmt.Sprintf("概念 %q 描述", cpt.Name),
+			src:    cpt.Name,
+			target: target,
+			typ:    RelDescribes,
+		})
 	}
 	return nil
-}
-
-// requireDescribes 校验概念描述的目标：表/列/指标 均可（describes 边语义）。
-func (c *compiler) requireDescribes(concept, target string) error {
-	e, ok := c.entities[target]
-	if !ok {
-		return fmt.Errorf("%w: 概念 %q 描述 %q 不存在", ErrRefMissing, concept, target)
-	}
-	switch e.Kind {
-	case KindTable, KindColumn, KindMetric:
-		return nil
-	default:
-		return fmt.Errorf("概念 %q 描述 %q：类型是 %s，需要 table/column/metric", concept, target, e.Kind)
-	}
 }

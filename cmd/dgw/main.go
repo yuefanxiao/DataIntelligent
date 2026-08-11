@@ -411,16 +411,17 @@ func cmdSemanticSync() {
 	// 应用后的通配覆盖告警：新表不在通配快照 = 默认拒绝，提示重展开。
 	warnPatternCoverage(ctx, st)
 
-	// embedding（ADR-0002「增量只嵌入变更实体」）：只对 diff 的
-	// Added + Updated 实体生成向量；墓碑实体清理向量。失败降级不阻塞。
+	// embedding（ADR-0002「增量只嵌入变更实体」）：默认只对 diff 的
+	// Added + Updated 实体生成向量；墓碑实体清理向量。例外 = 向量库
+	// 缺失/模型不一致（API key 后配、模型切换）→ 全量回填，避免混合
+	// 维度余弦（08 检索的垃圾结果）。失败降级不阻塞。
 	if key := os.Getenv(config.EnvOpenAIKey); key != "" {
 		model := os.Getenv(config.EnvEmbeddingModel)
 		if model == "" {
 			model = semantic.DefaultEmbeddingModel
 		}
 		emb := semantic.NewOpenAIEmbedder(key, model)
-		changed := &semantic.Target{Entities: append(
-			append([]semantic.Entity{}, res.Diff.EntitiesAdded...), res.Diff.EntitiesUpdated...)}
+		changed := embeddingTarget(ctx, st, res.Diff, model)
 		n, embErr := semantic.EmbedEntityTexts(ctx, st, changed, emb, model,
 			func(format string, args ...any) { log.Printf(format, args...) })
 		if embErr != nil {
@@ -509,13 +510,13 @@ func warnPatternCoverage(ctx context.Context, st *store.Store) {
 
 	uncovered := 0
 	for _, up := range patterns {
-		user, pattern := splitPattern(up)
+		user, pattern := grants.SplitExpandKey(up)
 		var tables []string
 		switch {
-		case strings.HasPrefix(pattern, "service:"):
-			tables, err = semantic.TablesForService(ctx, st, strings.TrimPrefix(pattern, "service:"))
-		case strings.HasPrefix(pattern, "database:"):
-			tables, err = semantic.TablesForDatabase(ctx, st, strings.TrimPrefix(pattern, "database:"))
+		case strings.HasPrefix(pattern, grants.PrefixService):
+			tables, err = semantic.TablesForService(ctx, st, strings.TrimPrefix(pattern, grants.PrefixService))
+		case strings.HasPrefix(pattern, grants.PrefixDatabase):
+			tables, err = semantic.TablesForDatabase(ctx, st, strings.TrimPrefix(pattern, grants.PrefixDatabase))
 		default:
 			log.Printf("未知通配声明 %q（跳过）", pattern)
 			continue
@@ -561,14 +562,33 @@ func warnStaleGrants(ctx context.Context, st *store.Store, grantsList []grants.G
 	}
 }
 
-// splitPattern 拆开 user\x00pattern（与 grants 包内建键同构）。
-func splitPattern(k string) (user, pattern string) {
-	for i := 0; i < len(k); i++ {
-		if k[i] == 0 {
-			return k[:i], k[i+1:]
+// embeddingTarget 决定本次同步要嵌入的实体集：
+//   - 全量（Snapshot 全部活跃实体）：向量库缺失或模型不一致——API key 后配
+//     （首启留空）与 DGW_EMBEDDING_MODEL 切换（混合维度余弦 = 垃圾检索结果）
+//     都需要全量回填；
+//   - 增量（diff 的 Added + Updated）：常规幂等同步（ADR-0002「增量只嵌入
+//     变更实体」）。
+//
+// 覆盖检查失败按全量回填处理（fail-safe 方向：宁可多嵌不可漏嵌）。
+func embeddingTarget(ctx context.Context, st *store.Store, d *semantic.Diff, model string) *semantic.Target {
+	missing, mismatch, err := semantic.EmbeddingCoverage(ctx, st, model)
+	if err != nil || missing > 0 || mismatch > 0 {
+		if err != nil {
+			log.Printf("embedding 覆盖检查失败（按全量回填处理）: %v", err)
+		} else if missing > 0 {
+			log.Printf("embedding 全量回填：%d 个实体缺向量（API key 后配或历史失败）", missing)
+		} else {
+			log.Printf("embedding 全量回填：模型切换残留旧向量（混合维度不可用于检索）")
 		}
+		t, snapErr := semantic.Snapshot(ctx, st)
+		if snapErr != nil {
+			log.Printf("全量回填取快照失败（降级：跳过本轮 embedding）: %v", snapErr)
+			return &semantic.Target{}
+		}
+		return t
 	}
-	return k, ""
+	return &semantic.Target{Entities: append(
+		append([]semantic.Entity{}, d.EntitiesAdded...), d.EntitiesUpdated...)}
 }
 
 // cmdSemanticBackup 备份运行时存储：WAL checkpoint + 文件拷贝（ADR-0005）。
