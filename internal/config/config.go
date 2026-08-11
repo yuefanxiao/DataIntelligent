@@ -19,6 +19,15 @@ const (
 	EnvProcessConcurrency = "DGW_PROCESS_CONCURRENCY"     // 进程级总并发上限（默认 8，spec §4.9）
 )
 
+// §4.9 参数表默认值（env 可覆盖；网关/测试共用的单一事实源——
+// cmd/dgw 与 gateway 包都从这里取，避免字面量漂移）。
+const (
+	DefaultSQLLimit           = 500
+	DefaultPGTimeoutMS        = 30000
+	DefaultKeyConcurrency     = 2
+	DefaultProcessConcurrency = 8
+)
+
 // Config 是一次进程启动的配置快照。
 type Config struct {
 	// DBPath 是 SQLite 运行时存储文件路径。
@@ -46,10 +55,10 @@ func FromEnv() Config {
 		HTTPAddr:           getenv(EnvHTTPAddr, ":8080"),
 		APIKey:             os.Getenv(EnvAPIKey),
 		PGDatabases:        os.Getenv(EnvPGDatabases),
-		SQLLimit:           getenvInt(EnvSQLLimit, 500),
-		PGTimeoutMS:        getenvInt(EnvPGTimeoutMS, 30000),
-		KeyConcurrency:     getenvInt(EnvKeyConcurrency, 2),
-		ProcessConcurrency: getenvInt(EnvProcessConcurrency, 8),
+		SQLLimit:           getenvInt(EnvSQLLimit, DefaultSQLLimit),
+		PGTimeoutMS:        getenvInt(EnvPGTimeoutMS, DefaultPGTimeoutMS),
+		KeyConcurrency:     getenvInt(EnvKeyConcurrency, DefaultKeyConcurrency),
+		ProcessConcurrency: getenvInt(EnvProcessConcurrency, DefaultProcessConcurrency),
 	}
 }
 

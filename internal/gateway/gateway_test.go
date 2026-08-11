@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -250,19 +251,36 @@ func sampleArgs(tool string) map[string]any {
 	}
 }
 
-// HTTP 形态下身份（auth.TokenInfo.UserID）应流达工具调用层。
+// HTTP 形态下身份（auth.TokenInfo.UserID + Extra.key_id）应流达工具调用层。
 func TestHTTPIdentityPropagates(t *testing.T) {
 	g, st := newTestGateway(t)
 	key := createKey(t, st, "dev-alice")
 
+	// key 的行 ID = 每 key 并发闸的粒度标识（KeyFromContext 应读到它）
+	var wantKeyID string
+	keys, err := credentials.List(context.Background(), st.DB())
+	if err != nil {
+		t.Fatalf("credentials.List: %v", err)
+	}
+	for _, k := range keys {
+		if k.UserID == "dev-alice" {
+			wantKeyID = strconv.FormatInt(k.ID, 10)
+		}
+	}
+
 	var mu sync.Mutex
-	var seenUser string
+	var seenUser, seenKey string
 	g.Server().AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "tools/call" {
 				if u, ok := UserFromContext(ctx); ok {
 					mu.Lock()
 					seenUser = u
+					mu.Unlock()
+				}
+				if k, ok := KeyFromContext(ctx); ok {
+					mu.Lock()
+					seenKey = k
 					mu.Unlock()
 				}
 			}
@@ -283,7 +301,10 @@ func TestHTTPIdentityPropagates(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if seenUser != "dev-alice" {
-		t.Errorf("工具调用层身份 = %q, want %q", seenUser, "dev-alice")
+		t.Errorf("工具调用层用户身份 = %q, want %q", seenUser, "dev-alice")
+	}
+	if seenKey != wantKeyID {
+		t.Errorf("工具调用层 key 身份 = %q, want %q（每 key 并发闸粒度）", seenKey, wantKeyID)
 	}
 }
 
@@ -307,14 +328,31 @@ func TestStdioFormEndToEnd(t *testing.T) {
 	g, st := newTestGateway(t)
 	key := createKey(t, st, "dev-alice")
 
+	// key 的行 ID = 每 key 并发闸的粒度标识（KeyFromContext 应读到它）
+	var wantKeyID string
+	keys, err := credentials.List(context.Background(), st.DB())
+	if err != nil {
+		t.Fatalf("credentials.List: %v", err)
+	}
+	for _, k := range keys {
+		if k.UserID == "dev-alice" {
+			wantKeyID = strconv.FormatInt(k.ID, 10)
+		}
+	}
+
 	var mu sync.Mutex
-	var seenUser string
+	var seenUser, seenKey string
 	g.Server().AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "tools/call" {
 				if u, ok := UserFromContext(ctx); ok {
 					mu.Lock()
 					seenUser = u
+					mu.Unlock()
+				}
+				if k, ok := KeyFromContext(ctx); ok {
+					mu.Lock()
+					seenKey = k
 					mu.Unlock()
 				}
 			}
@@ -352,7 +390,10 @@ func TestStdioFormEndToEnd(t *testing.T) {
 
 	mu.Lock()
 	if seenUser != "dev-alice" {
-		t.Errorf("stdio 身份 = %q, want %q", seenUser, "dev-alice")
+		t.Errorf("stdio 用户身份 = %q, want %q", seenUser, "dev-alice")
+	}
+	if seenKey != wantKeyID {
+		t.Errorf("stdio key 身份 = %q, want %q（每 key 并发闸粒度）", seenKey, wantKeyID)
 	}
 	mu.Unlock()
 

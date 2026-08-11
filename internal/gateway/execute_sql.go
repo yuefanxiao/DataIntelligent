@@ -52,12 +52,18 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 	// ── 闸：并发闸（负载防护，05 票）─────────────────────────────────────
 	// 每 key 并发 2 + 进程级总并发 8 双信号量（spec §4.9）：超限结构化拒绝
 	// （rate_limited，不排队、快速失败，§6.3 负向例 4）。闸在路由/校验之前
-	// ——饱和时连校验 CPU 都不花。key = 绑定身份（UserFromContext）；stdio
-	// 形态单 key 单进程，天然退化为每进程闸。占用位持有到本调用结束
-	// （defer Release）；进程级闸全 key 共享（守护进程语义）。
-	keyID, _ := UserFromContext(ctx)
+	// ——饱和时连校验 CPU 都不花。key = 调用凭据（KeyFromContext：HTTP 经
+	// TokenInfo.Extra 注入，stdio 进程 key 预置——一用户多 key 各占配额）；
+	// 身份缺失时回退用户/unknown（防御，正常路径不可达）。stdio 形态单 key
+	// 单进程，天然退化为每进程闸。占用位持有到本调用结束（defer Release）；
+	// 进程级闸全 key 共享（守护进程语义）。
+	keyID, _ := KeyFromContext(ctx)
 	if keyID == "" {
-		keyID = "unknown" // 防御：正常路径（HTTP 已认证 / stdio 已预置）不可达
+		if uid, ok := UserFromContext(ctx); ok {
+			keyID = uid
+		} else {
+			keyID = "unknown"
+		}
 	}
 	if e := g.loadGate.TryAcquire(keyID); e != nil {
 		return errResult(e), nil, nil

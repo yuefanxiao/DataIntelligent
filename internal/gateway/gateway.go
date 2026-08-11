@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/authz"
+	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
@@ -60,12 +61,11 @@ const (
 	sqlLimitMax     = 5000
 )
 
-// 并发闸默认值（spec §4.9 参数表：每 key 2 / 进程级 8；env 可覆盖——
-// 与 config 包同源默认）。网关恒启用并发闸（负载防护不缺席），
-// WithLoadGate 只调数值。
+// 并发闸默认值（spec §4.9 参数表，config 包导出——单一事实源；env 可覆盖）。
+// 网关恒启用并发闸（负载防护不缺席），WithLoadGate 只调数值。
 const (
-	keyConcurrencyDefault     = 2
-	processConcurrencyDefault = 8
+	keyConcurrencyDefault     = config.DefaultKeyConcurrency
+	processConcurrencyDefault = config.DefaultProcessConcurrency
 )
 
 // WithExecuteSQL 注入 execute_sql 的 PG 路由与行数限额（spec §4.9「env 可
@@ -172,6 +172,32 @@ func UserFromContext(ctx context.Context) (string, bool) {
 	}
 	if ti := auth.TokenInfoFromContext(ctx); ti != nil && ti.UserID != "" {
 		return ti.UserID, true
+	}
+	return "", false
+}
+
+// keyIDContextKey 是凭据 key 身份（每 key 并发闸粒度）的上下文键，
+// 来源与 userIDContextKey 对应：stdio 预置 / HTTP 经 TokenInfo.Extra。
+type keyIDContextKey struct{}
+
+func withKeyID(ctx context.Context, keyID string) context.Context {
+	return context.WithValue(ctx, keyIDContextKey{}, keyID)
+}
+
+// KeyFromContext 返回当前调用绑定的凭据 key 身份（ADR-0004 key→用户扁平
+// 映射：一用户多 key，每 key 独立计数）：
+//   - stdio 形态：ServeStdio 预置（withKeyID，进程的 key）；
+//   - HTTP 形态：verifyToken 写入 auth.TokenInfo.Extra["key_id"]。
+//
+// 未认证的调用返回 "", false。
+func KeyFromContext(ctx context.Context) (string, bool) {
+	if keyID, ok := ctx.Value(keyIDContextKey{}).(string); ok && keyID != "" {
+		return keyID, true
+	}
+	if ti := auth.TokenInfoFromContext(ctx); ti != nil {
+		if keyID, ok := ti.Extra["key_id"].(string); ok && keyID != "" {
+			return keyID, true
+		}
 	}
 	return "", false
 }

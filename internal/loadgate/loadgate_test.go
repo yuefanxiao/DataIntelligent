@@ -122,6 +122,35 @@ func TestReleaseRestores(t *testing.T) {
 	}
 }
 
+// 幂等释放不破坏进程级计数：别的 key 在途时释放未占用 key，totalCur
+// 必须原样保留（totalCur 与各 key 计数之和的恒等式，破坏即闸欠计数）。
+func TestReleaseUnheldKeyPreservesProcessCount(t *testing.T) {
+	g, err := New(2, 8)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if e := g.TryAcquire("dev-alice"); e != nil {
+		t.Fatalf("占用 alice: %v", e)
+	}
+	if e := g.TryAcquire("dev-bob"); e != nil {
+		t.Fatalf("占用 bob: %v", e)
+	}
+	// 释放未占用的 key：进程级计数不得被拉低（否则闸欠计数、超限放行）。
+	g.Release("dev-never-held")
+	if g.totalCur != 2 {
+		t.Fatalf("幂等释放后 totalCur = %d，期望 2（alice+bob 在途）", g.totalCur)
+	}
+	// 真实占用的 key 正常释放后进程级计数随之下调。
+	g.Release("dev-alice")
+	if g.totalCur != 1 {
+		t.Fatalf("释放 alice 后 totalCur = %d，期望 1", g.totalCur)
+	}
+	g.Release("dev-bob")
+	if g.totalCur != 0 {
+		t.Fatalf("全部释放后 totalCur = %d，期望 0", g.totalCur)
+	}
+}
+
 // 并发压力：多 goroutine 随机占用/释放，占用数永不超过双闸上限
 // （race detector 同时验证锁的正确性；本测试用 -race 跑）。
 func TestConcurrentStress(t *testing.T) {

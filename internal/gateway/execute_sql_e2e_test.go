@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/credentials"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
@@ -486,20 +488,58 @@ func outcomeOf(res *mcp.CallToolResult, err error, elapsed time.Duration) callOu
 	return callOutcome{res: &out, elapsed: elapsed}
 }
 
+// assertFastReject 断言一次调用被并发闸快速拒绝（<1s 不排队）且 reason 正确。
+func assertFastReject(t *testing.T, session *mcp.ClientSession, wantReason string) *gwerr.Error {
+	t.Helper()
+	start := time.Now()
+	e := callSQLErr(t, session, map[string]any{"sql": "SELECT pg_sleep(3)", "dbname": "bss"})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("并发超限请求耗时 %v，期望快速失败（不排队）", elapsed)
+	}
+	if e.Kind != gwerr.KindRateLimited || e.Details["reason"] != wantReason {
+		t.Fatalf("请求 = %s reason=%v，期望 rate_limited/%s", e.Kind, e.Details["reason"], wantReason)
+	}
+	return e
+}
+
+// drainHolders 收齐在途查询的结果并断言全部成功（闸位不误伤在途请求）。
+func drainHolders(t *testing.T, out chan callOutcome, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if oc := <-out; oc.e != nil {
+			t.Fatalf("在途查询应成功，得到错误: %v", oc.e)
+		}
+	}
+}
+
 // 负向例 4：同 key 并发 >2 → 结构化拒绝（不排队、不影响其他 key）。
-// 每 key 配额 2：两并发在途时第三发快速失败；其他 key 照常放行；
-// 在途结束后配额恢复。
+// 每 key 配额 2：两并发在途时第三发快速失败；同用户其他 key / 其他用户
+// 照常放行（key 粒度隔离）；在途结束后配额恢复。
 func TestExecuteSQLE2EConcurrencyGate(t *testing.T) {
 	requirePG(t)
 	g, st := e2eGatewayWith(t, []db.Entry{{DBName: "bss", Service: "bss", DSN: bssDSN}}, 500, 30*time.Second, 2, 8, "bss.bss.orders")
 	keyA := createKey(t, st, "dev-alice")
 	keyB := createKey(t, st, "dev-bob")
-	// bob 也需要表授权（隔离断言用）
+	// bob 也需要表授权（跨用户隔离断言用）
 	if err := grants.AddGrant(context.Background(), st, "dev-bob", "bss.bss.orders"); err != nil {
 		t.Fatalf("AddGrant(bob): %v", err)
 	}
 	if err := g.authz.Load(context.Background()); err != nil {
 		t.Fatalf("authz.Load: %v", err)
+	}
+	// keyA 的行 ID = 每 key 闸的粒度标识（details.key 应等于它）
+	var keyAID string
+	keys, err := credentials.List(context.Background(), st.DB())
+	if err != nil {
+		t.Fatalf("credentials.List: %v", err)
+	}
+	for _, k := range keys {
+		if k.UserID == "dev-alice" {
+			keyAID = strconv.FormatInt(k.ID, 10)
+		}
+	}
+	if keyAID == "" {
+		t.Fatal("找不到 dev-alice 的 key")
 	}
 	ts := httptest.NewServer(g.HTTPHandler())
 	defer ts.Close()
@@ -523,33 +563,31 @@ func TestExecuteSQLE2EConcurrencyGate(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond) // 等两个查询真正在途（闸位已占用）
 
-	// 第三发（同 key）→ 快速失败：rate_limited/key_concurrency_limit，<1s
-	start := time.Now()
-	e := callSQLErr(t, sa3, map[string]any{"sql": "SELECT pg_sleep(3)", "dbname": "bss"})
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("第三发耗时 %v，期望快速失败（不排队）", elapsed)
-	}
-	if e.Kind != gwerr.KindRateLimited || e.Details["reason"] != loadgate.ReasonKeyConcurrency {
-		t.Fatalf("第三发 = %s reason=%v，期望 rate_limited/%s", e.Kind, e.Details["reason"], loadgate.ReasonKeyConcurrency)
-	}
+	// 第三发（同 key）→ 快速失败：rate_limited/key_concurrency_limit
+	e := assertFastReject(t, sa3, loadgate.ReasonKeyConcurrency)
 	// 经 JSON 解码的数值是 float64（闸内是 int，契约以值比较）
-	if e.Details["key"] != "dev-alice" || e.Details["limit"] != float64(2) {
-		t.Errorf("details = %v，期望 key=dev-alice limit=2", e.Details)
+	if e.Details["key"] != keyAID || e.Details["limit"] != float64(2) {
+		t.Errorf("details = %v，期望 key=%s limit=2", e.Details, keyAID)
 	}
 
-	// 其他 key 不受影响（key 隔离）：bob 照常查询成功
+	// 同用户、另一把 key 不受影响（每 key 粒度，§6.3「不影响其他 key」）：
+	// dev-alice 的第二把 key 并发查询成功
+	keyA2 := createKey(t, st, "dev-alice")
+	saOther := connectHTTP(t, ts.URL, keyA2)
+	defer saOther.Close()
+	resA2 := callSQL(t, saOther, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
+	if len(resA2.Rows) != 1 {
+		t.Fatalf("同用户另一 key 查询应成功: %+v", resA2)
+	}
+
+	// 其他用户也不受影响（跨用户隔离）：bob 照常查询成功
 	resB := callSQL(t, sb, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
 	if len(resB.Rows) != 1 {
 		t.Fatalf("bob 查询应成功: %+v", resB)
 	}
 
 	// 两个在途查询正常完成（闸位不误伤在途请求）
-	for i := 0; i < 2; i++ {
-		oc := <-out
-		if oc.e != nil {
-			t.Fatalf("在途查询应成功，得到错误: %v", oc.e)
-		}
-	}
+	drainHolders(t, out, 2)
 
 	// 在途结束 → 配额恢复：同 key 再查成功
 	callSQL(t, sa3, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
@@ -592,24 +630,13 @@ func TestExecuteSQLE2EProcessGate(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 第三 key（每 key 配额未满）→ 进程级闸拒绝，快速失败
-	start := time.Now()
-	e := callSQLErr(t, sc, map[string]any{"sql": "SELECT pg_sleep(3)", "dbname": "bss"})
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("第三发耗时 %v，期望快速失败（不排队）", elapsed)
-	}
-	if e.Kind != gwerr.KindRateLimited || e.Details["reason"] != loadgate.ReasonProcessConcurrency {
-		t.Fatalf("第三发 = %s reason=%v，期望 rate_limited/%s", e.Kind, e.Details["reason"], loadgate.ReasonProcessConcurrency)
-	}
+	e := assertFastReject(t, sc, loadgate.ReasonProcessConcurrency)
 	if e.Details["limit"] != float64(2) {
 		t.Errorf("details = %v，期望 limit=2", e.Details)
 	}
 
-	// 在途查询正常完成
-	for i := 0; i < 2; i++ {
-		if oc := <-out; oc.e != nil {
-			t.Fatalf("在途查询应成功，得到错误: %v", oc.e)
-		}
-	}
+	// 在途查询正常完成（闸位不误伤在途请求）
+	drainHolders(t, out, 2)
 
 	// 进程级配额恢复：carol 再查成功
 	callSQL(t, sc, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
