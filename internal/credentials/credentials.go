@@ -75,3 +75,52 @@ func Verify(ctx context.Context, db *sql.DB, plaintext string) (string, error) {
 	}
 	return userID, nil
 }
+
+// KeyInfo 是快照视图里的一把 key（明文不存在，哈希即身份标识）。
+type KeyInfo struct {
+	ID        int64 // 行 ID：吊销命令的寻址句柄
+	UserID    string
+	CreatedAt string
+	RevokedAt string // 空串 = 有效
+}
+
+// List 返回全部 key 的快照（按创建时间升序），供授权快照/吊销寻址。
+func List(ctx context.Context, db *sql.DB) ([]KeyInfo, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, user_id, created_at, COALESCE(revoked_at, '')
+		 FROM dgw_credentials ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list keys: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []KeyInfo
+	for rows.Next() {
+		var k KeyInfo
+		if err := rows.Scan(&k.ID, &k.UserID, &k.CreatedAt, &k.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return keys, nil
+}
+
+// Revoke 吊销一把 key（置 revoked_at）——幂等：已吊销/不存在都视为成功。
+// 生效即时：Verify 每次请求查库，无需网关重启或缓存失效。
+// 返回吊销前状态：false = 原本已吊销或不存在。
+func Revoke(ctx context.Context, db *sql.DB, id int64) (bool, error) {
+	res, err := db.ExecContext(ctx,
+		`UPDATE dgw_credentials SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		 WHERE id = ? AND revoked_at IS NULL`, id)
+	if err != nil {
+		return false, fmt.Errorf("revoke key %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("revoke key %d: %w", id, err)
+	}
+	return n > 0, nil
+}

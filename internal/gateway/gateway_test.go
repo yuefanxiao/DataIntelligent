@@ -29,7 +29,11 @@ func newTestGateway(t *testing.T) (*Gateway, *store.Store) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, slog.New(slog.NewTextHandler(io.Discard, nil))), st
+	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	return g, st
 }
 
 func createKey(t *testing.T, st *store.Store, userID string) string {
@@ -129,9 +133,26 @@ func assertToolList(t *testing.T, session *mcp.ClientSession) {
 // —— HTTP 形态 ——
 
 // 无 token / 错 token → 401 + 结构化认证失败（kind=unauthorized）。
+// 已吊销的 key 同样 401（吊销即时生效，AC5）。
 func TestHTTPAuthRejectsMissingAndWrongToken(t *testing.T) {
 	g, st := newTestGateway(t)
+	ctx := context.Background()
 	_ = createKey(t, st, "dev-alice")
+
+	// 先吊销一把 key，验证吊销后的凭据立即失效（HTTP 每请求查库校验）。
+	revokedKey := createKey(t, st, "dev-bob")
+	keys, err := credentials.List(ctx, st.DB())
+	if err != nil {
+		t.Fatalf("credentials.List: %v", err)
+	}
+	for _, k := range keys {
+		if k.UserID == "dev-bob" {
+			if _, err := credentials.Revoke(ctx, st.DB(), k.ID); err != nil {
+				t.Fatalf("Revoke: %v", err)
+			}
+		}
+	}
+
 	ts := httptest.NewServer(g.HTTPHandler())
 	defer ts.Close()
 
@@ -139,6 +160,7 @@ func TestHTTPAuthRejectsMissingAndWrongToken(t *testing.T) {
 		"无 token":  mustRequest(t, http.MethodGet, ts.URL, ""),
 		"错 token":  mustRequest(t, http.MethodGet, ts.URL, "Bearer dgw_wrong-token"),
 		"非 bearer": mustRequest(t, http.MethodGet, ts.URL, "dgw_plain-token"),
+		"已吊销 key":  mustRequest(t, http.MethodGet, ts.URL, "Bearer "+revokedKey),
 	} {
 		t.Run(name, func(t *testing.T) {
 			resp, err := http.DefaultClient.Do(req)
