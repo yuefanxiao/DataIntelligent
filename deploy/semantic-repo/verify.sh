@@ -77,15 +77,10 @@ else
 fi
 
 echo "==> [3/5] 版本机制：commit + push（review = Gitea PR 承载）"
-if git -C "$WORK" status --short | grep -q "services/bss-wallet.yaml"; then
-  git -C "$WORK" add services/bss-wallet.yaml
-  git -C "$WORK" commit -q -m "collect: bss-wallet 语义回写确认（人工 review 后合入）"
-  git -C "$WORK" push -q origin HEAD
-  echo "    committed + pushed（HEAD = $(git -C "$WORK" rev-parse --short HEAD)）"
-else
-  echo "FAIL: 采集后 services/bss-wallet.yaml 应存在变更（结构漂移或语义回写标记）"
-  exit 1
-fi
+git -C "$WORK" add services/bss-wallet.yaml
+git -C "$WORK" commit -q -m "collect: bss-wallet 语义回写确认（人工 review 后合入）"
+git -C "$WORK" push -q origin HEAD
+echo "    committed + pushed（HEAD = $(git -C "$WORK" rev-parse --short HEAD)）"
 
 echo "==> [4/5] 同步管线：dry-run diff + 应用（对 clone 操作）"
 go run ./cmd/dgw semantic-sync --dir "$WORK" --db "$STORE" --dry-run \

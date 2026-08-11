@@ -230,20 +230,20 @@ databases:
 	s := string(out)
 	for _, want := range []string{
 		"description: 钱包服务（已确认描述）", // 服务描述保留
-		"description: 钱包库（已确认）",     // 库描述保留
-		"description: 账户表（已确认）",     // 表描述保留
-		"description: 账户状态（已确认）",    // 列描述保留
-		"label: 正常（已确认）",            // 枚举 label 保留
-		"is_time: true",                // is_time 保留
-		"name: paid_at",                // 新列进来（无语义字段）
+		"description: 钱包库（已确认）",    // 库描述保留
+		"description: 账户表（已确认）",    // 表描述保留
+		"description: 账户状态（已确认）",   // 列描述保留
+		"label: 正常（已确认）",           // 枚举 label 保留
+		"is_time: true",            // is_time 保留
+		"name: paid_at",            // 新列进来（无语义字段）
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("合并结果缺 %q:\n%s", want, s)
 		}
 	}
 	for _, bad := range []string{
-		"label: 冻结",        // 枚举值被移除 → label 随结构丢弃
-		"dropped_table",    // 表被移除 → 描述随结构丢弃
+		"label: 冻结",     // 枚举值被移除 → label 随结构丢弃
+		"dropped_table", // 表被移除 → 描述随结构丢弃
 		"description: 已删除表的描述（应随结构丢弃）",
 	} {
 		if strings.Contains(s, bad) {
@@ -257,6 +257,21 @@ databases:
 	// 现有文件解析失败 → 拒绝（防语义丢失）。
 	if _, err := MergeSemantics([]byte(newDraft), []byte("not: [valid: yaml")); err == nil {
 		t.Error("现有文件解析失败应拒绝合并")
+	}
+	// 现有文件含未建模字段 → 拒绝（KnownFields 严格解析，防静默丢字段）。
+	if _, err := MergeSemantics([]byte(newDraft), []byte(existing+"  unknown_field: x\n")); err == nil {
+		t.Error("现有文件含未建模字段应拒绝合并（KnownFields）")
+	}
+	// 列类型变化 → is_time 标注随结构丢弃（陈旧时间轴不进 dry-run 展开）。
+	typeChanged := strings.ReplaceAll(existing,
+		"- name: created_at\n            type: timestamptz\n            is_time: true",
+		"- name: created_at\n            type: varchar(64)\n            is_time: true")
+	out2, err := MergeSemantics([]byte(newDraft), []byte(typeChanged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out2), "is_time: true") {
+		t.Errorf("列类型变化后 is_time 应丢弃:\n%s", out2)
 	}
 }
 
@@ -306,6 +321,7 @@ func TestWriteDraftPreservesSemantics(t *testing.T) {
 		}
 	}
 }
+
 // TestCollectNoDBService 全量采集含无库服务：产出服务实体草稿 + warn
 // 发现，不进迁移解析（目录不存在也不报错）。
 func TestCollectNoDBService(t *testing.T) {

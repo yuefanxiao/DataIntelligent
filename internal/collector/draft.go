@@ -109,6 +109,15 @@ func RenderDraft(st *Structure) ([]byte, error) {
 	return encodeDraft(f)
 }
 
+// parseDraftStrict 按 KnownFields 严格解析现有作者入口（与 07 同步管线
+// semantic.Load 同契约）：未知字段 = 错误。合并路径必须严格——宽松解析
+// 会把未建模字段静默丢弃（见 MergeSemantics 注释）。
+func parseDraftStrict(data []byte, out *draftFile) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	return dec.Decode(out)
+}
+
 // encodeDraft 按草稿统一格式渲染（2 空格缩进，yaml.v3 编码器；
 // RenderDraft 与 MergeSemantics 共用，保证输出风格一致）。
 func encodeDraft(f draftFile) ([]byte, error) {
@@ -129,7 +138,12 @@ func encodeDraft(f draftFile) ([]byte, error) {
 // 只更新结构，不覆盖人工语义（ADR-0007「结构自动、语义人工」：
 // 语义回写后不会因增量采集丢失，纯结构变更批量确认 US-16 负担≈零）。
 // 合并只读语义字段：结构（表/列/枚举值/引用）永远以新采集为准，
-// 已删除的表/列/枚举值的语义自然随结构丢弃。
+// 已删除的表/列/枚举值的语义自然随结构丢弃；列类型变化的 is_time
+// 标注一并丢弃（陈旧时间轴不进入 dry-run 展开）。
+//
+// 现有文件按 KnownFields 严格解析（与 semantic.Load 同契约）：作者入口
+// 出现本包未建模的字段 = 合并失败（响亮拒绝覆盖），绝不静默丢弃——
+// 语义层新增字段时采集重跑不会悄悄抹掉它，而是报错等人工处理。
 //
 // 确定性：同输入同输出（输出经统一渲染，与 RenderDraft 同序）。
 func MergeSemantics(newDraft, existing []byte) ([]byte, error) {
@@ -138,8 +152,8 @@ func MergeSemantics(newDraft, existing []byte) ([]byte, error) {
 		return nil, fmt.Errorf("解析新草稿: %w", err)
 	}
 	var prev draftFile
-	if err := yaml.Unmarshal(existing, &prev); err != nil {
-		return nil, fmt.Errorf("合并语义失败（现有作者入口 %s 解析失败，拒绝覆盖以免丢失语义）: %w", cur.Service, err)
+	if err := parseDraftStrict(existing, &prev); err != nil {
+		return nil, fmt.Errorf("合并语义失败（现有作者入口 %s 解析失败或含未建模字段，拒绝覆盖以免丢失语义）: %w", cur.Service, err)
 	}
 	if prev.Service != "" && prev.Service != cur.Service {
 		return nil, fmt.Errorf("合并语义失败（现有作者入口服务名 %q ≠ 草稿 %q，拒绝覆盖）", prev.Service, cur.Service)
@@ -164,7 +178,12 @@ func MergeSemantics(newDraft, existing []byte) ([]byte, error) {
 				}
 				col := &cur.Databases[i].Tables[j].Columns[k]
 				col.Description = pc.Description
-				col.IsTime = pc.IsTime
+				// is_time 只在类型未变时保留：列类型变化说明时间轴语义
+				// 存疑，陈旧标注会进入 dry-run 时间展开（在非时间列上
+				// 生成谓词）——随结构丢弃，等人工重新确认。
+				if pc.Type == col.Type {
+					col.IsTime = pc.IsTime
+				}
 				for m := range col.EnumValues {
 					if pe := findDraftEnum(pc, col.EnumValues[m].Value); pe != nil {
 						col.EnumValues[m].Label = pe.Label

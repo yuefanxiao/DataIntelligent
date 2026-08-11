@@ -115,7 +115,7 @@ func cmdScan() int {
 		OutDir:   *out,
 	})
 	if err != nil {
-		log.Fatalf("采集失败（未产出）: %v", err)
+		log.Fatalf("采集中止: %v（已采集服务可能已写出草稿，失败服务保持原样）", err)
 	}
 
 	gateErrors := 0

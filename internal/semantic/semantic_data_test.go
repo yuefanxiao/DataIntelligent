@@ -2,8 +2,10 @@ package semantic
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,24 +20,45 @@ import (
 // shippedDir 是交付的作者入口目录（相对 internal/semantic 包）。
 func shippedDir() string { return filepath.Join("..", "..", "samples", "semantic") }
 
-// syncShipped 把交付作者入口同步进全新运行时存储（编译校验原子门禁）。
+// shippedOnce 让全部 TestShipped* 共享一次全量 Sync（13 服务约 4600 行
+// YAML 只编译一遍；每测试各自开全新 store 再 Load+Compile 是重复工作）。
+var shippedOnce sync.Once
+var shippedSt *store.Store
+var shippedErr error
+
+// syncShipped 把交付作者入口同步进运行时存储（编译校验原子门禁；
+// 同步结果缓存，测试间共享——不注册 t.Cleanup，进程退出即清理）。
 func syncShipped(t *testing.T) *store.Store {
 	t.Helper()
-	st := newStore(t)
-	if _, err := Sync(context.Background(), st, shippedDir()); err != nil {
-		t.Fatalf("同步交付语义仓库失败: %v", err)
+	shippedOnce.Do(func() {
+		st, err := store.Open(filepath.Join(t.TempDir(), "shipped.db"))
+		if err != nil {
+			shippedErr = fmt.Errorf("打开运行时存储: %w", err)
+			return
+		}
+		if _, err := Sync(context.Background(), st, shippedDir()); err != nil {
+			st.Close()
+			shippedErr = fmt.Errorf("同步交付语义仓库失败: %w", err)
+			return
+		}
+		shippedSt = st
+	})
+	if shippedErr != nil {
+		t.Fatal(shippedErr)
 	}
-	return st
+	return shippedSt
 }
 
 // kindFQNs 返回运行时存储里某类实体的 FQN 列表（升序；prefix 过滤可选）。
+// prefix 用于「服务名.%」前缀匹配：服务名含 _ 时 LIKE 的 _ 是单字符通配
+// （bss_wallet 会误匹配 bssXwallet），需 ESCAPE 转义。
 func kindFQNs(t *testing.T, st *store.Store, kind Kind, prefix string) []string {
 	t.Helper()
 	q := "SELECT fqn FROM dgw_sem_entities WHERE kind = ? AND tombstone = 0"
 	args := []any{string(kind)}
 	if prefix != "" {
-		q += " AND fqn LIKE ?"
-		args = append(args, prefix+".%")
+		q += " AND fqn LIKE ? ESCAPE '\\'"
+		args = append(args, strings.ReplaceAll(prefix, "_", `\_`)+".%")
 	}
 	q += " ORDER BY fqn"
 	rows, err := st.DB().QueryContext(context.Background(), q, args...)
