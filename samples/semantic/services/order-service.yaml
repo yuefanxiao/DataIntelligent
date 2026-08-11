@@ -1,0 +1,31 @@
+# 订单服务（样例）
+version: 1
+service: order-service
+description: 订单服务——订单主表，支付单 references 的目标
+databases:
+  - name: order_db
+    description: 订单库
+    tables:
+      - name: orders
+        description: 订单
+        columns:
+          - name: id
+            type: uuid
+            description: 订单主键
+          - name: status
+            type: varchar
+            description: 订单状态
+            enum_values:
+              - value: created
+                label: 已创建
+              - value: paid
+                label: 已支付
+              - value: cancelled
+                label: 已取消
+          - name: total_amount
+            type: numeric
+            description: 订单总额（元）
+          - name: created_at
+            type: timestamptz
+            is_time: true
+            description: 下单时间

@@ -237,7 +237,7 @@ func TestSyncFullReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	res, err := Sync(ctx, s, f)
+	res, err := Sync(ctx, s, f, nil)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSyncIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	res1, err := Sync(ctx, s, f)
+	res1, err := Sync(ctx, s, f, nil)
 	if err != nil {
 		t.Fatalf("第 1 次 Sync: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestSyncIdempotent(t *testing.T) {
 		t.Errorf("第 1 次 Sync = %+v, want Added=3 Removed=0 Revision=1", res1)
 	}
 
-	res2, err := Sync(ctx, s, f)
+	res2, err := Sync(ctx, s, f, nil)
 	if err != nil {
 		t.Fatalf("第 2 次 Sync: %v", err)
 	}
