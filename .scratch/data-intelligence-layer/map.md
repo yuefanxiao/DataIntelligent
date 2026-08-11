@@ -59,3 +59,11 @@
 
 
 
+
+## Map 完成（2026-08-11）
+
+目的地达成：docs/spec.md（PR #16 合入 main）；14 张票全部关闭（research×4 + grilling×9 + task×1）；ADR-0001~0010 + CONTEXT + decision-discussion 全量记录。
+
+交接物（按 ADR-0010，非本 map 票）：① 团队评审（demo + 意见清零 + 拍板确认，通过前不开构建票）② v1 构建实施票（评审后开）③ 阶段 2-4 入口轻量评审时开票。
+
+遗留 fog 随 map 关闭归档：v2 规划引擎 / 权限优化 / 工作台管理面 / Gitea 触发 / 监控+OTel / 校准·drift 例行 / API 定义采集 / 采集源扩展 / 复制延迟 / 生产通路 / Agent 编排形态。
