@@ -1,5 +1,7 @@
 # 语义层存储与检索：独立 PG 实例 + YAML 作者入口 + RRF 混合检索
 
+> ⚠️ **已被修正**：存储载体由「独立 PG 实例」改为「SQLite 单文件」（v1 唯一实现，PG 作升级路径）——见 [ADR-0005](./0005-semantic-store-sqlite.md)（票据 13）。本 ADR 的检索方案（五条原语 + RRF + OpenAI embedding + 不引入图数据库）与作者入口/同步管线决策原样有效。
+
 语义层运行时存储 = 同机房**独立 PG 实例**（与生产集群隔离，同步管线零生产凭证），作者入口 = **按服务拆分的 YAML 语义模型文件**（+ 全局指标/概念文件），自研 Go 同步管线编译、校验、增量同步（幂等 upsert + 墓碑软删除 + dry-run diff）；运行时**只查 PG，不查 YAML**。检索 = 五条数据层原语（FQN 精确 / 双入口关键词 / 类型化边遍历 / 指标公式 / 枚举值），`search_entities` 走 **RRF（Reciprocal Rank Fusion）混合**——pg_trgm 关键词主通道优先 + pgvector 向量兜底，不设固定比例；v1 引入向量，embedding 用外部 OpenAI text-embedding-3（接受元数据出机房）。不引入图数据库（边表 + WITH RECURSIVE）。来源：票据 07（issue #8），2026-08-11 拍板。
 
 ## Considered Options
