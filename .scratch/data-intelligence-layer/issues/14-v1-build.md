@@ -1,7 +1,7 @@
 # 14 v1 最小完整闭环构建（13 服务全量）
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/15
-Status: open
+Status: closed
 Blocked by (open blockers): 0
 
 Part of #1
@@ -34,3 +34,11 @@ Part of #1
 （当前阶段）产出 spec + phase plan（docs/spec.md）→ 交团队评审（PR + 30min demo，意见清零 + 拍板人确认）→ 评审通过后实施剩余交付物（网关/同步/采集/权限/验收套件）→ 进入阶段 2（运营化）
 
 参考：ADR-0001~0010、docs/research/（01 SDK 选型、02 规划草案）
+
+## 决议（2026-08-11）：v1 spec 先行规格产出 ✅
+
+- 拍板人改口：执行序改为 **spec 先行**（ADR-0010 修正横幅，其余决策原样有效）
+- 交付物：docs/spec.md 全量规格（to-spec 模板 + 验收标准附录 + 参数表）
+- 合入：PR #16 已合入 main（含 ADR-0001~0010 + CONTEXT + research 全量决策记录）
+- 事实：spec 在 docs/spec.md（main）；PR #16 即评审载体（demo + 意见清零 + 拍板确认）；评审通过前不开构建票
+- 剩余交付物（转出本票，评审通过后开新 task 票）：网关、语义仓库（Gitea YAML）、同步管线/采集器 CLI + Skill、grants YAML + 权限 CLI、执行记录 JSONL、验收套件
