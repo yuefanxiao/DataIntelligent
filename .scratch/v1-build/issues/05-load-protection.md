@@ -1,8 +1,8 @@
 # v1 build 05 — 负载防护：并发闸 + statement_timeout
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/22
-Status: assigned（yuefanxiao，2026-08-12 领取；实现 + 单测完成，PR 合入后关闭）
-Blocked by (open blockers): 0
+Status: closed（2026-08-12，PR #35 合入 main；验收五条全过 + 双轴 code review + 对抗评审收敛已修复）
+Blocked by (open blockers): 0（#21 已于 #34 合入）
 
 ## 来源
 
