@@ -18,10 +18,10 @@ commit/revert/review 即版本机制与变更闸门。本目录 = 仓库初始�
 ## 标准工作流（采集 → review → 合入 → 同步）
 
 ```sh
-# 采集器：结构知识 → YAML 草稿（写在 clone 的 services/ 下）
+# 采集器：结构知识 → YAML 草稿（写在 clone 的 services/ 下；--out 指向 clone 根）
 dgw-collect scan --repo ~/cloud/neo-cloud \
   --manifest samples/collector/manifest.yaml \
-  --out ./semantic-repo/services
+  --out ./semantic-repo
 
 # 自查 diff（草稿会覆盖同名服务文件）
 git -C ./semantic-repo diff
@@ -52,7 +52,7 @@ dgw semantic-backup --out /backup/semantic-$(date +%F).db   # WAL checkpoint + �
 
 ## 校验（验收标准第 5 条：管线/采集器可对语义仓库操作）
 
-- 采集器 `--out` 指向 clone 的 `services/` → 草稿即仓库变更（git diff 可见）；
+- 采集器 `--out` 指向 clone 根 → 草稿落 clone 的 `services/`（git diff 可见）；
 - 同步管线 `--dir` 指向 clone → 编译校验原子拒绝 + dry-run diff + 幂等应用；
 - 本地无 Gitea 时可先用裸仓库模拟远端验证路径：
 

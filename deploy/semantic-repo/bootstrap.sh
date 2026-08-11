@@ -14,7 +14,7 @@
 #
 # 初始化后的标准工作流（详见 deploy/semantic-repo/README.md）：
 #   1. 跑采集器出草稿：dgw-collect scan --repo ~/cloud/neo-cloud \
-#        --manifest samples/collector/manifest.yaml --out <工作目录>/services
+#        --manifest samples/collector/manifest.yaml --out <工作目录>
 #   2. 人工 review（Gitea PR）→ 合入
 #   3. 本机 pull → dgw semantic-sync --dir <工作目录>（进运行时）
 #   4. 回滚 = git revert + 重跑同步管线（墓碑传播删除）
@@ -56,7 +56,7 @@ cat <<'EOF'
 
   采集    dgw-collect scan --repo ~/cloud/neo-cloud \
             --manifest samples/collector/manifest.yaml \
-            --out <工作目录>/services
+            --out <工作目录>
   review  草稿经 Gitea PR 人工 review（纯结构变更可批量确认，US-16）
   合入    Gitea merge（commit 即版本）
   同步    git pull && dgw semantic-sync --dir <工作目录>
