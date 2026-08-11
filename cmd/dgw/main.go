@@ -93,7 +93,7 @@ func usage() {
   dgw grants-snapshot [--db PATH]           查看授权快照（key + 表授权）
   dgw semantic-sync --dir DIR [--db PATH] [--dry-run]   语义同步管线：编译 → dry-run diff → 应用
   dgw semantic-backup --out PATH [--db PATH] 运行时存储备份（WAL checkpoint + 文件拷贝）
-  dgw selfcheck       启动自检：逐 dbname 两条硬校验（pg_is_in_recovery + 角色级 statement_timeout），不过拒启
+  dgw selfcheck       启动自检：逐 dbname 三条硬校验（pg_is_in_recovery + 角色级 statement_timeout + current_database），不过拒启
 
 权限 CLI 仅限网关宿主机运行（能上宿主机 = 运维者，v1 无管理员角色）；
 grants YAML 是表授权的事实源（git review 即权限变更评审闸门），
@@ -165,7 +165,7 @@ func gatewayOpts(cfg config.Config) (opts []gateway.Option, router *db.Router, c
 }
 
 // runStartupSelfCheck 是启动自检接线（ADR-0009，不过拒启）：serve /
-// serve-stdio 在网关服务前对全部 dbname 路由跑两条硬校验，失败 = 进程
+// serve-stdio 在网关服务前对全部 dbname 路由跑三条硬校验，失败 = 进程
 // 退出（拒启）。router 为 nil（未配置 DGW_PG_DATABASES）时无可自检对象，
 // 跳过——execute_sql 未配置，网关只服务语义工具（结构化「未配置」拒绝）。
 func runStartupSelfCheck(cfg config.Config, router *db.Router) {
@@ -712,7 +712,7 @@ func cmdSemanticBackup() {
 	fmt.Printf("dgw: 已备份到 %s（WAL checkpoint + 文件拷贝，可直接用于回滚恢复）\n", *out)
 }
 
-// cmdSelfCheck 单独跑启动自检（ADR-0009 两条硬校验，不过拒启）：与
+// cmdSelfCheck 单独跑启动自检（ADR-0009 三条硬校验，不过拒启）：与
 // serve 启动时同一校验路径，独立子命令供运维排障与失败场景演示
 // （「连错主库 / 角色级超时未生效 → 拒启」不必起网关即可复现）。
 func cmdSelfCheck() {

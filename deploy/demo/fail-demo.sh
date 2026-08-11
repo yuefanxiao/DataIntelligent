@@ -58,8 +58,10 @@ echo
 echo "==> 场景 B：角色级 statement_timeout 与 env 不一致（应拒启）"
 psql_pri -c "ALTER ROLE dgw_reader SET statement_timeout = '15s'"
 wait_rep_timeout "15s"
-if gw_cycle | grep -q "statement_timeout"; then
-  echo "    ✅ 场景 B 复现：角色 15s vs env 30s → 拒启（日志点名 statement_timeout）"
+# 判别力：成功日志「…statement_timeout 生效」与失败日志「…statement_timeout
+# 未生效」都含 "statement_timeout"——必须 grep「未生效」才能证伪。
+if gw_cycle | grep -q "未生效"; then
+  echo "    ✅ 场景 B 复现：角色 15s vs env 30s → 拒启（日志点名 statement_timeout 未生效）"
 else
   echo "    ❌ 场景 B 未复现"
   gw_cycle
@@ -81,4 +83,4 @@ else
   exit 1
 fi
 echo
-echo "✅ 失败场景演示完成：两条硬校验（连错主库 / 超时不一致）均已复现拒启"
+echo "✅ 失败场景演示完成：启动自检硬校验（连错主库 / 超时不一致）均已复现拒启"

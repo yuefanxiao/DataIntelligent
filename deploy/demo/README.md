@@ -27,7 +27,7 @@ CNPG 从库，`pg_is_in_recovery() = true`）+ compose 起网关 + 真实 MCP
 |---|---|
 | 三挂载 /data /logs /config 0600 | `docker compose -f ../docker-compose.yml exec dgw ls -ld /data /logs /config` |
 | 凭证只在 env 文件 | `../config/env`（0600，gitignored；DSN 即凭证） |
-| 启动自检两条硬校验 | 启动日志「启动自检通过：N 条 dbname 路由全部连到从库…」 |
+| 启动自检三条硬校验 | 启动日志「启动自检通过：N 条 dbname 路由全部连到从库…」 |
 | 拒启失败场景 | `./fail-demo.sh`（A 连主库 / B 超时不一致 / C 对照） |
 | 语义仓库操作路径 | `../semantic-repo/bootstrap.sh`（本地裸仓库模拟 Gitea） |
 

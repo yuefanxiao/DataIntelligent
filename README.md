@@ -31,7 +31,7 @@ DGW_API_KEY=<上面打印的 key> dgw serve-stdio
 ## 部署（ADR-0009）
 
 内部开发机单机 Docker（compose 单服务、三挂载 /data /logs /config 0600、
-`restart: unless-stopped`、凭证只在宿主机 env 文件）；启动自检两条硬校验
+`restart: unless-stopped`、凭证只在宿主机 env 文件）；启动自检三条硬校验
 （`pg_is_in_recovery() = true` + 角色级 statement_timeout 生效，不过拒启）。
 
 ```sh

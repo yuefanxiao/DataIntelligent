@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// 启动自检 e2e（ADR-0009 两条硬校验的真实形态验证）：Docker 起「主 + 从」
+// 启动自检 e2e（ADR-0009 三条硬校验的真实形态验证）：Docker 起「主 + 从」
 // 流复制栈——主库正常；从库容器启动时先 pg_basebackup（-R 写
 // primary_conninfo + standby.signal）再以 hot_standby 启动，模拟 CNPG
 // 一主两从拓扑的单从形态。共享只读角色 dgw_ro 建在主库（经 WAL 复制到从库）。
@@ -305,7 +305,7 @@ func TestDBNames(t *testing.T) {
 	}
 }
 
-// ── e2e：两条硬校验 ──────────────────────────────────────────────────────
+// ── e2e：三条硬校验 ──────────────────────────────────────────────────────
 
 func TestSelfCheck(t *testing.T) {
 	requirePG(t)

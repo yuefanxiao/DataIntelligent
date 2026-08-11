@@ -21,7 +21,7 @@
 3. **权限**：双表面——业务数据面默认拒绝、表级 FQN 白名单授权（指标/概念授权编译期展开为表授权）；语义元数据面认证即读。凭据 = opaque 随机串（`dgw_` 前缀、sha256 哈希存储、明文仅创建时打印一次），key→用户扁平 grants，一用户多 key、吊销即时；grants YAML + CLI 维护，编译进 SQLite 权限表，网关启动加载内存 + 热重载。
 4. **执行记录**：六工具全记 + 认证失败/权限拒绝 + key 生命周期 = 结构化 JSONL（宿主机文件 + 轮转），字段契约含 SQL 原文（不脱敏，宿主机权限即访问边界）、分阶段耗时、状态、行数、truncated、plan_id、被拒原因；原始 ~7 天 + 聚合摘要 ~30 天。
 
-**部署**：内部开发机单机 Docker（三 volume：SQLite/执行记录/env 0600），数据库凭证只存该机 env 文件；启动自检两条硬校验（`pg_is_in_recovery()` + 角色级 statement_timeout 生效确认，不过拒启）；DSN 可配置 + 按 dbname 路由（生产网络通路生产部署时定）。
+**部署**：内部开发机单机 Docker（三 volume：SQLite/执行记录/env 0600），数据库凭证只存该机 env 文件；启动自检三条硬校验（`pg_is_in_recovery()` + 角色级 statement_timeout 生效确认 + `current_database()` 与路由 dbname 一致，不过拒启）；DSN 可配置 + 按 dbname 路由（生产网络通路生产部署时定）。
 
 **负载防护数值**（见 §4.9 参数表）：每 key 并发 2 / 进程级 8 / statement_timeout 30s（可配）/ SQL 限额 500-5000。
 

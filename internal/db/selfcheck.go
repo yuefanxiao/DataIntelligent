@@ -1,7 +1,7 @@
 // 启动自检（ADR-0009 / spec §4.8，不过拒启）：逐 dbname 三条硬校验——
 //
-//  1. pg_is_in_recovery() = true：防连错主库（业务从库是唯一合法目标；
-//     连到主库 = 校验层物理边界整体失效）；
+//  1. pg_catalog.pg_is_in_recovery() = true：防连错主库（业务从库是唯一
+//     合法目标；连到主库 = 校验层物理边界整体失效）；
 //  2. 角色级 statement_timeout 生效：用「纯净连接」（不带网关连接级
 //     参数）SHOW statement_timeout，值等于网关配置才放行——证明共享只读
 //     角色（ADR-0004）的 provisioning 边界真实落地，而非仅依赖网关侧
@@ -12,7 +12,8 @@
 // 校验对象 = 每条 dbname 路由（同一共享只读角色连 10 库，ADR-0004；任一
 // 库连错/超时未生效 = 拒启，不留「部分边界」）。自检连接是逐条实时连接，
 // 不做池缓存——自检的意义就是启动瞬间的真实边界探测；探测失败（连不上）
-// 同样拒启（fail closed）。
+// 同样拒启（fail closed）。边界结论只保证启动瞬间（CNPG failover 提升
+// 从库后失效直至重启；周期再校验 = ADR-0009 后置的阶段 2 项）。
 package db
 
 import (
@@ -30,7 +31,7 @@ import (
 // 连不上 = 拒启，与「不过拒启」同一语义；数值为进程内常量，不入参数表）。
 const selfcheckProbeTimeout = 10 * time.Second
 
-// SelfCheck 逐 dbname 跑两条硬校验（不过拒启）。任一失败 = 聚合错误
+// SelfCheck 逐 dbname 跑三条硬校验（不过拒启）。任一失败 = 聚合错误
 // （全部 dbname 的失败一并报出，运维一次看到全貌；成功项不在错误里）。
 // want 是配置的 statement_timeout（DGW_PG_STATEMENT_TIMEOUT_MS），角色级
 // 生效值须与之相等（两边不一致 = 边界事实不清，拒启）。
@@ -48,7 +49,7 @@ func (r *Router) SelfCheck(ctx context.Context, want time.Duration) error {
 	return nil
 }
 
-// selfCheckOne 对单条 dbname 路由跑两条硬校验。
+// selfCheckOne 对单条 dbname 路由跑三条硬校验。
 func (r *Router) selfCheckOne(ctx context.Context, dbname string, wantMs int64) error {
 	rt := r.routes[dbname]
 	pctx, cancel := context.WithTimeout(ctx, selfcheckProbeTimeout)
@@ -56,21 +57,28 @@ func (r *Router) selfCheckOne(ctx context.Context, dbname string, wantMs int64) 
 
 	// 纯净连接：去掉网关强制参数（statement_timeout / 只读事务），SHOW
 	// 才能反映角色级真实生效值——否则校验的永远是网关自己的连接参数。
+	// 大小写不敏感删除 + 剔除 options（DSN 的 options=-c statement_timeout
+	// 也会随启动包下发并被后端按命令行开关应用，同样会掩盖角色级缺配）。
 	cfg, err := pgx.ParseConfig(rt.dsn)
 	if err != nil {
 		return fmt.Errorf("DSN 解析失败: %w", err)
 	}
-	delete(cfg.RuntimeParams, "statement_timeout")
-	delete(cfg.RuntimeParams, "default_transaction_read_only")
+	for key := range cfg.RuntimeParams {
+		switch strings.ToLower(key) {
+		case "statement_timeout", "default_transaction_read_only", "options":
+			delete(cfg.RuntimeParams, key)
+		}
+	}
 	conn, err := pgx.ConnectConfig(pctx, cfg)
 	if err != nil {
 		return fmt.Errorf("连接失败: %w", err)
 	}
 	defer conn.Close(context.Background())
 
-	// 硬校验 1：pg_is_in_recovery() = true（从库才合法）。
+	// 硬校验 1：pg_catalog.pg_is_in_recovery() = true（从库才合法；限定
+	// pg_catalog 前缀防 search_path 同名函数遮蔽）。
 	var inRecovery bool
-	if err := conn.QueryRow(pctx, `SELECT pg_is_in_recovery()`).Scan(&inRecovery); err != nil {
+	if err := conn.QueryRow(pctx, `SELECT pg_catalog.pg_is_in_recovery()`).Scan(&inRecovery); err != nil {
 		return fmt.Errorf("查询 pg_is_in_recovery() 失败: %w", err)
 	}
 	if !inRecovery {
@@ -91,10 +99,10 @@ func (r *Router) selfCheckOne(ctx context.Context, dbname string, wantMs int64) 
 			shown, gotMs, wantMs)
 	}
 
-	// 硬校验 3：current_database() 与路由 dbname 一致（DSN 指错库 = 授权
-	// FQN 与执行目标错位，整个路由失效——db.go 注释的 10 票职责）。
+	// 硬校验 3：pg_catalog.current_database() 与路由 dbname 一致（DSN 指错
+	// 库 = 授权 FQN 与执行目标错位，整个路由失效——db.go 注释的 10 票职责）。
 	var curDB string
-	if err := conn.QueryRow(pctx, `SELECT current_database()`).Scan(&curDB); err != nil {
+	if err := conn.QueryRow(pctx, `SELECT pg_catalog.current_database()`).Scan(&curDB); err != nil {
 		return fmt.Errorf("查询 current_database() 失败: %w", err)
 	}
 	if curDB != dbname {

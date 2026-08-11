@@ -8,6 +8,7 @@
 --   \set ro_password '<强随机口令>'    -- 必填：角色口令（psql 变量）
 --   \set ro_timeout '30s'              -- 可选：角色级 statement_timeout（默认 30s）
 --   \i readonly-role.sql
+--
 -- 幂等：重跑安全（角色已存在只更新属性/授权）。新表出现后重跑本脚本即补
 -- 授权——ALTER DEFAULT PRIVILEGES 只影响「执行本脚本的用户」后续建的对象，
 -- 应用角色建的新表需重跑（v1 采集器 calibrate 漂移报告只报告不改，新表
@@ -15,7 +16,8 @@
 --
 -- 安全边界（本脚本落实）：
 --   - 物理不能写：NOSUPERUSER/NOCREATEDB/NOCREATEROLE/NOINHERIT + 只授
---     SELECT（+ USAGE/CONNECT）；网关校验层的「PG 物理边界」依赖它；
+--     SELECT（+ USAGE/CONNECT）+ 收函数 EXECUTE；网关校验层的「PG 物理
+--     边界」依赖它；
 --   - 超时边界：角色级 statement_timeout（网关启动自检第二条硬校验，
 --     值须与网关 env DGW_PG_STATEMENT_TIMEOUT_MS 一致，不一致拒启）；
 --   - 收 SET ROLE 能力：NOINHERIT + 不授予任何角色成员资格 → 无法
@@ -49,14 +51,19 @@ ALTER ROLE dgw_reader SET statement_timeout = :'ro_timeout';
 --    iam 域：iam / iam_audit
 --    其他：console / notification / ops_ticket
 --    每段：收 TEMP → CONNECT → schema USAGE → 现存表 SELECT → 默认权限
+--    → 收函数 EXECUTE（PUBLIC 默认持有 EXECUTE——只对角色 REVOKE 无效，
+--    因为 PUBLIC 是隐式成员；能从 schema 执行任意函数即可能触发写库存储
+--    过程/触发器，「物理不能写」不闭合。从 PUBLIC 收回；函数属主（应用
+--    角色）不受影响，跨角色显式调用需另 GRANT）。
 --    （注意：GRANT SELECT 只授现表；ALTER DEFAULT PRIVILEGES 兜自己建的表）
-
 \c bill
 REVOKE TEMPORARY ON DATABASE bill FROM dgw_reader;
 GRANT CONNECT ON DATABASE bill TO dgw_reader;
 GRANT USAGE ON SCHEMA bill TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bill TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bill GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA bill FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA bill REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c wallet
 REVOKE TEMPORARY ON DATABASE wallet FROM dgw_reader;
@@ -64,6 +71,8 @@ GRANT CONNECT ON DATABASE wallet TO dgw_reader;
 GRANT USAGE ON SCHEMA wallet TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA wallet TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA wallet GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA wallet FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA wallet REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c bss_invoice
 REVOKE TEMPORARY ON DATABASE bss_invoice FROM dgw_reader;
@@ -71,6 +80,8 @@ GRANT CONNECT ON DATABASE bss_invoice TO dgw_reader;
 GRANT USAGE ON SCHEMA bss_invoice TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bss_invoice TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bss_invoice GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA bss_invoice FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA bss_invoice REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c subscription
 REVOKE TEMPORARY ON DATABASE subscription FROM dgw_reader;
@@ -78,6 +89,8 @@ GRANT CONNECT ON DATABASE subscription TO dgw_reader;
 GRANT USAGE ON SCHEMA subscription TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA subscription TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA subscription GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA subscription FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA subscription REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c promotion
 REVOKE TEMPORARY ON DATABASE promotion FROM dgw_reader;
@@ -85,6 +98,8 @@ GRANT CONNECT ON DATABASE promotion TO dgw_reader;
 GRANT USAGE ON SCHEMA promotion TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA promotion TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA promotion GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA promotion FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA promotion REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c iam
 REVOKE TEMPORARY ON DATABASE iam FROM dgw_reader;
@@ -92,6 +107,8 @@ GRANT CONNECT ON DATABASE iam TO dgw_reader;
 GRANT USAGE ON SCHEMA public TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c iam_audit
 REVOKE TEMPORARY ON DATABASE iam_audit FROM dgw_reader;
@@ -99,6 +116,8 @@ GRANT CONNECT ON DATABASE iam_audit TO dgw_reader;
 GRANT USAGE ON SCHEMA public TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c console
 REVOKE TEMPORARY ON DATABASE console FROM dgw_reader;
@@ -106,6 +125,8 @@ GRANT CONNECT ON DATABASE console TO dgw_reader;
 GRANT USAGE ON SCHEMA public TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c notification
 REVOKE TEMPORARY ON DATABASE notification FROM dgw_reader;
@@ -113,6 +134,8 @@ GRANT CONNECT ON DATABASE notification TO dgw_reader;
 GRANT USAGE ON SCHEMA public TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 \c ops_ticket
 REVOKE TEMPORARY ON DATABASE ops_ticket FROM dgw_reader;
@@ -120,6 +143,8 @@ GRANT CONNECT ON DATABASE ops_ticket TO dgw_reader;
 GRANT USAGE ON SCHEMA public TO dgw_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- 4) 验证（psql 对照）：应输出 superuser=off / 无成员资格 / timeout=30s
 --    \c bill
@@ -129,3 +154,4 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dgw_reader;
 --    SHOW statement_timeout;  -- 以 dgw_reader 连接时 = 30s（角色级生效）
 --    CREATE TEMP TABLE t(x int);  -- 应拒绝（无 TEMP 权限）
 --    SET ROLE postgres;           -- 应拒绝（无成员资格）
+--    SELECT bill.fn_demo();       -- 应拒绝（EXECUTE 已从 PUBLIC 收回）

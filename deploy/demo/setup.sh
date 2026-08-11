@@ -48,6 +48,13 @@ if [ "$SKIP_PG" = false ]; then
   echo "    从库 recovery 形态确认：pg_is_in_recovery() = t"
 
   echo "==> [3/6] 主库准备生产形态 + 演示数据，然后跑真实 provisioning..."
+  # 幂等提示：named volume 持久化，既有 demo 数据重跑会 CREATE DATABASE
+  # 失败——指引 --skip-pg 复用或 down -v 重建。
+  if psql_pri -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'bill'" | grep -q 1; then
+    echo "    检测到既有 demo 数据（bill 库已存在）。"
+    echo "    重跑请用 --skip-pg 复用 PG 栈；需重建先 docker compose -f docker-compose.pg.yml down -v"
+    exit 1
+  fi
   psql_pri -d postgres -c "CREATE DATABASE bill" -c "CREATE DATABASE wallet" \
     -c "CREATE DATABASE bss_invoice" -c "CREATE DATABASE subscription" -c "CREATE DATABASE promotion" \
     -c "CREATE DATABASE iam" -c "CREATE DATABASE iam_audit" \

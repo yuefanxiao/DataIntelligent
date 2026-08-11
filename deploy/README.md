@@ -3,7 +3,7 @@
 **形态**：内部开发机单机 Docker（compose 单服务），**不进生产集群**；
 三挂载：SQLite `/data`、执行记录 `/logs`、凭证 env `/config` 0600；
 `restart: unless-stopped`；数据库凭证**只存该机 env 文件**，开发机/CI
-零凭证；启动自检两条硬校验（不过拒启）；回滚基线 = 旧镜像 tag + SQLite
+零凭证；启动自检三条硬校验（不过拒启）；回滚基线 = 旧镜像 tag + SQLite
 备份文件恢复。
 
 ```
@@ -67,7 +67,14 @@ dgw: MCP Streamable HTTP 监听 :8080（bearer 认证）
 
 - DSN 指向主库 → `pg_is_in_recovery() = false——连到的是主库`；
 - 角色未配 statement_timeout / 与 env 不一致 → `角色级 statement_timeout 未生效`；
+- DSN 指错库 → `current_database() 与路由 dbname 不一致`；
 - 从库不可达 → `连接失败`。
+
+**边界声明**：自检结论保证**启动瞬间**的物理边界；CNPG failover 把从库
+提升为主库后，运行中的网关不会自行再校验（延迟监测/周期再校验 = 阶段 2
+运营化项，ADR-0009），failover 后应重启网关让自检重新兜底。健康状态外部
+信号 = `docker compose ps`（healthcheck：自检不过的崩溃循环显示
+`unhealthy`/`restarting`，`up -d` 本身无失败信号）。
 
 单独复现（不起网关）：`docker compose ... exec dgw dgw selfcheck` 或宿主机 `dgw selfcheck`。
 

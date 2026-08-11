@@ -22,12 +22,33 @@ WORK="/tmp/semantic-work"
 REMOTE="/tmp/semantic-remote.git"
 STORE="/tmp/semantic-verify.db"
 
-for arg in "$@"; do
-  case "$arg" in
-  --repo) REPO="${2:-}" ;;
-  --work) WORK="${2:-}" ;;
+# 参数解析：只接受 --repo/--work 两个 flag（值跟随其后），其余拒绝；
+# 所有工作路径必须落在 /tmp 下（清理 rm -rf 的安全边界——绝不触碰
+# 用户真实路径）。
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  --repo)
+    [ "$#" -ge 2 ] || { echo "--repo 需要值"; exit 2; }
+    REPO="$2"; shift 2
+    ;;
+  --work)
+    [ "$#" -ge 2 ] || { echo "--work 需要值"; exit 2; }
+    WORK="$2"; shift 2
+    ;;
+  *)
+    echo "未知参数: $1" >&2
+    exit 2
+    ;;
   esac
 done
+case "$WORK" in
+/tmp/*) ;;
+*) echo "错误: --work 必须落在 /tmp 下（清理安全边界）" >&2; exit 2 ;;
+esac
+case "$REMOTE" in
+/tmp/*) ;;
+*) echo "错误: --remote 必须落在 /tmp 下（清理安全边界）" >&2; exit 2 ;;
+esac
 
 rm -rf "$REMOTE" "$WORK" "$STORE" "$STORE-wal" "$STORE-shm"
 git init --bare -q "$REMOTE"
