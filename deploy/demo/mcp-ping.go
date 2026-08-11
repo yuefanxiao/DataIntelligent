@@ -1,6 +1,6 @@
 // mcp-ping：对已部署网关做真实 MCP 往返探测（HTTP 形态，官方 go-sdk）。
 //
-// 部署验收工具（ADR-0009 第 5 条「docker compose up 后网关可用，经 MCP
+// 部署验收工具（issue #27 验收第 1 条「docker compose up 后网关可用，经 MCP
 // 查询成功」与排障）：initialize → tools/list → （可选）工具调用——
 // execute_sql（--dbname/--sql）或语义工具（--tool/--query，如
 // search_entities/get_entity）。只测外部行为（工具协议层），不作业务断言。

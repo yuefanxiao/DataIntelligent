@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,7 +133,9 @@ func startPGReplicaStack() error {
 		return fmt.Errorf("从库 recovery 就绪超时: %v", err)
 	}
 
-	// provisioning 建在主库（WAL 复制到从库；角色配置/库/表/授权全量复制）。
+	// provisioning 直接执行交付物脚本 deploy/provisioning/readonly-role.sql
+	// （单源：测试验证的边界 = 产品脚本声明的边界，不与测试内联 SQL 漂移）。
+	// 脚本含 10 个 \c 段 → 先建 10 库 + bss 域 schema（脚本 GRANT 对象）。
 	psql := func(dbname string, stmts ...string) error {
 		args := []string{"exec", "-u", "postgres", pgPrimary, "psql",
 			"-U", "postgres", "-h", "127.0.0.1", "-d", dbname, "-v", "ON_ERROR_STOP=1", "-q"}
@@ -144,35 +147,52 @@ func startPGReplicaStack() error {
 		}
 		return nil
 	}
-	if err := psql("postgres",
-		"CREATE ROLE dgw_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
-		"CREATE DATABASE bss",
-		"ALTER ROLE dgw_ro SET statement_timeout = '30s'",
-	); err != nil {
-		stopPGReplicaStack()
-		return err
+	dbs := []string{"bill", "wallet", "bss_invoice", "subscription", "promotion",
+		"iam", "iam_audit", "console", "notification", "ops_ticket"}
+	for _, dbn := range dbs {
+		if err := psql("postgres", "CREATE DATABASE "+dbn); err != nil {
+			stopPGReplicaStack()
+			return err
+		}
 	}
-	if err := psql("bss",
-		"CREATE TABLE orders (id bigint PRIMARY KEY, status text NOT NULL)",
-		"INSERT INTO orders VALUES (1, 'paid'), (2, 'refunded')",
-		"GRANT SELECT ON orders TO dgw_ro",
-	); err != nil {
+	// bss 域 = 库内同名 schema 前缀（采集器生产形态；provisioning 的 GRANT 对象）。
+	for _, dbn := range dbs[:5] {
+		if err := psql(dbn, "CREATE SCHEMA "+dbn); err != nil {
+			stopPGReplicaStack()
+			return err
+		}
+	}
+	// 拷贝交付物脚本进主库容器并执行（角色 dgw_reader + 角色级超时 + 10 库授权）。
+	script, err := filepath.Abs(filepath.Join("..", "..", "deploy", "provisioning", "readonly-role.sql"))
+	if err != nil {
 		stopPGReplicaStack()
-		return err
+		return fmt.Errorf("定位 provisioning 脚本失败: %v", err)
+	}
+	if _, err := os.Stat(script); err != nil {
+		stopPGReplicaStack()
+		return fmt.Errorf("provisioning 脚本缺失（%s）: %v", script, err)
+	}
+	exec.Command("docker", "cp", script, pgPrimary+":/tmp/readonly-role.sql").Run()
+	if out, err := exec.Command("docker", "exec", "-u", "postgres", pgPrimary, "psql",
+		"-U", "postgres", "-h", "127.0.0.1", "-d", "postgres",
+		"-v", "ON_ERROR_STOP=1", "-v", "ro_password=test-ro-pass",
+		"-f", "/tmp/readonly-role.sql").CombinedOutput(); err != nil {
+		stopPGReplicaStack()
+		return fmt.Errorf("执行 readonly-role.sql 失败: %v\n%s", err, out)
 	}
 
-	// 等 WAL 追平：从库上 dgw_ro 能查 bss.orders（角色/库/表/超时全就位）。
+	// 等 WAL 追平：从库上 dgw_reader 的角色级超时生效（角色/库/授权全就位）。
 	if err := waitCmd(60*time.Second, func() bool {
-		out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_ro",
-			"-d", "bss", "-tAc", "SELECT count(*) FROM orders").CombinedOutput()
-		return err == nil && strings.TrimSpace(string(out)) == "2"
+		out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_reader",
+			"-d", "bill", "-tAc", "SHOW statement_timeout").CombinedOutput()
+		return err == nil && strings.TrimSpace(string(out)) == "30s"
 	}); err != nil {
 		stopPGReplicaStack()
 		return fmt.Errorf("从库 WAL 追平超时: %v", err)
 	}
 
-	replDSN = fmt.Sprintf("postgres://dgw_ro@127.0.0.1:%d/bss?sslmode=disable", replPort)
-	primDSN = fmt.Sprintf("postgres://dgw_ro@127.0.0.1:%d/bss?sslmode=disable", primPort)
+	replDSN = fmt.Sprintf("postgres://dgw_reader@127.0.0.1:%d/bill?sslmode=disable", replPort)
+	primDSN = fmt.Sprintf("postgres://dgw_reader@127.0.0.1:%d/bill?sslmode=disable", primPort)
 	return nil
 }
 
@@ -220,10 +240,10 @@ func requirePG(t *testing.T) {
 	}
 }
 
-// selfRouter 建单条 dbname 路由（自检探测对象）。
+// selfRouter 建单条 dbname 路由（自检探测对象；provisioning 脚本的持库 = bill）。
 func selfRouter(t *testing.T, dsn string) *Router {
 	t.Helper()
-	r, err := NewRouter(context.Background(), []Entry{{DBName: "bss", Service: "bss", DSN: dsn}}, 30*time.Second)
+	r, err := NewRouter(context.Background(), []Entry{{DBName: "bill", Service: "bss-bill", DSN: dsn}}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -310,12 +330,10 @@ func TestSelfCheck(t *testing.T) {
 
 	t.Run("拒启：角色级 statement_timeout 未生效", func(t *testing.T) {
 		// RESET 角色配置（主库改、WAL 复制到从库；poll 等生效）。
-		exec.Command("docker", "exec", "-u", "postgres", pgPrimary, "psql",
-			"-U", "postgres", "-h", "127.0.0.1", "-d", "postgres",
-			"-c", "ALTER ROLE dgw_ro RESET statement_timeout").Run()
+		alterRole(t, "ALTER ROLE dgw_reader RESET statement_timeout")
 		if err := waitCmd(60*time.Second, func() bool {
-			out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_ro",
-				"-d", "bss", "-tAc", "SHOW statement_timeout").CombinedOutput()
+			out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_reader",
+				"-d", "bill", "-tAc", "SHOW statement_timeout").CombinedOutput()
 			return err == nil && strings.TrimSpace(string(out)) != "30s"
 		}); err != nil {
 			t.Fatalf("角色超时 RESET 未复制到从库: %v", err)
@@ -329,20 +347,35 @@ func TestSelfCheck(t *testing.T) {
 			t.Fatalf("错误应点名 statement_timeout，得到: %v", err)
 		}
 		// 恢复（后续用例依赖角色边界）。
-		exec.Command("docker", "exec", "-u", "postgres", pgPrimary, "psql",
-			"-U", "postgres", "-h", "127.0.0.1", "-d", "postgres",
-			"-c", "ALTER ROLE dgw_ro SET statement_timeout = '30s'").Run()
+		alterRole(t, "ALTER ROLE dgw_reader SET statement_timeout = '30s'")
 		if err := waitCmd(60*time.Second, func() bool {
-			out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_ro",
-				"-d", "bss", "-tAc", "SHOW statement_timeout").CombinedOutput()
+			out, err := exec.Command("docker", "exec", pgReplica, "psql", "-U", "dgw_reader",
+				"-d", "bill", "-tAc", "SHOW statement_timeout").CombinedOutput()
 			return err == nil && strings.TrimSpace(string(out)) == "30s"
 		}); err != nil {
 			t.Fatalf("角色超时恢复未复制到从库: %v", err)
 		}
 	})
 
+	t.Run("拒启：DSN 指错库（current_database 与路由 dbname 不一致）", func(t *testing.T) {
+		// 路由声明 bill，DSN 连 iam → 授权 FQN 与执行目标错位，拒启。
+		iamDSN := fmt.Sprintf("postgres://dgw_reader@127.0.0.1:%d/iam?sslmode=disable", replPort)
+		r, err := NewRouter(context.Background(), []Entry{{DBName: "bill", Service: "bss-bill", DSN: iamDSN}}, 30*time.Second)
+		if err != nil {
+			t.Fatalf("NewRouter: %v", err)
+		}
+		defer r.Close()
+		err = r.SelfCheck(context.Background(), 30*time.Second)
+		if err == nil {
+			t.Fatal("DSN 指错库应拒启（无错误返回）")
+		}
+		if !strings.Contains(err.Error(), "current_database") {
+			t.Fatalf("错误应点名 current_database，得到: %v", err)
+		}
+	})
+
 	t.Run("拒启：目标不可达（连不上 = 拒启）", func(t *testing.T) {
-		dead := fmt.Sprintf("postgres://dgw_ro@127.0.0.1:%d/bss?sslmode=disable", freePort())
+		dead := fmt.Sprintf("postgres://dgw_reader@127.0.0.1:%d/bill?sslmode=disable", freePort())
 		r := selfRouter(t, dead)
 		err := r.SelfCheck(context.Background(), 30*time.Second)
 		if err == nil {
@@ -359,4 +392,14 @@ func TestSelfCheck(t *testing.T) {
 			t.Fatal("角色 30s vs 配置 15s 应拒启")
 		}
 	})
+}
+
+// alterRole 在主库执行角色配置变更并检查错误（复制生效由调用方 waitCmd 兜底）。
+func alterRole(t *testing.T, stmt string) {
+	t.Helper()
+	if out, err := exec.Command("docker", "exec", "-u", "postgres", pgPrimary, "psql",
+		"-U", "postgres", "-h", "127.0.0.1", "-d", "postgres",
+		"-v", "ON_ERROR_STOP=1", "-c", stmt).CombinedOutput(); err != nil {
+		t.Fatalf("psql %q 失败: %v\n%s", stmt, err, out)
+	}
 }

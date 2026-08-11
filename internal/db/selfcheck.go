@@ -1,11 +1,13 @@
-// 启动自检（ADR-0009 / spec §4.8，不过拒启）：逐 dbname 两条硬校验——
+// 启动自检（ADR-0009 / spec §4.8，不过拒启）：逐 dbname 三条硬校验——
 //
 //  1. pg_is_in_recovery() = true：防连错主库（业务从库是唯一合法目标；
 //     连到主库 = 校验层物理边界整体失效）；
 //  2. 角色级 statement_timeout 生效：用「纯净连接」（不带网关连接级
 //     参数）SHOW statement_timeout，值等于网关配置才放行——证明共享只读
 //     角色（ADR-0004）的 provisioning 边界真实落地，而非仅依赖网关侧
-//     连接参数兜底（spec §4.9「网关连接级 + 角色级双设置」）。
+//     连接参数兜底（spec §4.9「网关连接级 + 角色级双设置」）；
+//  3. current_database() 与路由 dbname 一致：DSN 目标库必须等于路由声明
+//     （db.go 注释的 10 票职责；DSN 指错库 = 授权 FQN 全部失效）。
 //
 // 校验对象 = 每条 dbname 路由（同一共享只读角色连 10 库，ADR-0004；任一
 // 库连错/超时未生效 = 拒启，不留「部分边界」）。自检连接是逐条实时连接，
@@ -87,6 +89,17 @@ func (r *Router) selfCheckOne(ctx context.Context, dbname string, wantMs int64) 
 	if gotMs != wantMs {
 		return fmt.Errorf("角色级 statement_timeout 未生效：当前 %s（%dms），配置要求 %dms（检查 provisioning：ALTER ROLE ... SET statement_timeout）",
 			shown, gotMs, wantMs)
+	}
+
+	// 硬校验 3：current_database() 与路由 dbname 一致（DSN 指错库 = 授权
+	// FQN 与执行目标错位，整个路由失效——db.go 注释的 10 票职责）。
+	var curDB string
+	if err := conn.QueryRow(pctx, `SELECT current_database()`).Scan(&curDB); err != nil {
+		return fmt.Errorf("查询 current_database() 失败: %w", err)
+	}
+	if curDB != dbname {
+		return fmt.Errorf("DSN 目标库 current_database() = %q，路由 dbname = %q（不一致，拒启；DSN 指错库 = 授权 FQN 全部失效）",
+			curDB, dbname)
 	}
 	return nil
 }

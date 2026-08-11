@@ -10,7 +10,7 @@
 # 失败场景演示（拒启）见 fail-demo.sh；语义仓库操作路径见
 # ../semantic-repo/README.md（bootstrap.sh 打通）。
 #
-# 用法：./setup.sh [--skip-pg] [--skip-gateway]
+# 用法：./setup.sh [--skip-pg] [--skip-gateway]（可组合）
 #   --skip-pg      复用已起的 PG 栈（跳过 1-3）
 #   --skip-gateway 只准备 PG/凭证，不起网关（联调用）
 # 环境：DGW_DEMO_REPL_PORT（从库宿主端口，默认 55432）、
@@ -21,13 +21,21 @@ cd "$(dirname "$0")"
 REPL_PORT="${DGW_DEMO_REPL_PORT:-55432}"
 export DGW_HTTP_PORT="${DGW_HTTP_PORT:-8080}"
 HTTP_PORT="$DGW_HTTP_PORT"
-SKIP_PG="${1:-}"
+SKIP_PG=false
+SKIP_GATEWAY=false
+for arg in "$@"; do
+  case "$arg" in
+  --skip-pg) SKIP_PG=true ;;
+  --skip-gateway) SKIP_GATEWAY=true ;;
+  *) echo "未知参数: $arg" >&2; exit 2 ;;
+  esac
+done
 ENV_FILE="../config/env"
 
 psql_pri() { docker compose -f docker-compose.pg.yml exec -T pg-primary psql -U postgres -v ON_ERROR_STOP=1 "$@"; }
 psql_rep() { docker compose -f docker-compose.pg.yml exec -T pg-replica psql -U postgres -v ON_ERROR_STOP=1 "$@"; }
 
-if [ "$SKIP_PG" != "--skip-pg" ]; then
+if [ "$SKIP_PG" = false ]; then
   echo "==> [1/6] 起 demo 主从 PG（流复制）..."
   docker compose -f docker-compose.pg.yml up -d
 
@@ -77,7 +85,7 @@ if [ "$SKIP_PG" != "--skip-pg" ]; then
   echo "    从库可读：orders = 600 行（角色/库/表/超时已复制）"
 fi
 
-if [ "$SKIP_PG" = "--skip-pg" ]; then
+if [ "$SKIP_PG" = true ]; then
   echo "==> [4/6] --skip-pg：复用已起 PG 栈（跳过 provisioning，请自行保证 dgw_reader 就绪）"
 fi
 
@@ -99,7 +107,7 @@ EOF
 chmod 600 "$ENV_FILE"
 echo "    已写 ${ENV_FILE}（0600，.gitignore 内）"
 
-if [ "$SKIP_PG" = "--skip-gateway" ]; then
+if [ "$SKIP_GATEWAY" = true ]; then
   echo "==> --skip-gateway：PG/凭证就绪，网关留给你起（docker compose -f ../docker-compose.yml up -d --build）"
   exit 0
 fi
@@ -125,6 +133,15 @@ go run mcp-ping.go --addr "http://127.0.0.1:${HTTP_PORT}" --key "$KEY" \
   --dbname bill --sql "SELECT * FROM orders LIMIT 3"
 
 echo
+echo "==> 三挂载断言（AC2：/data /logs 可写、/config/env 0600 只读）..."
+docker compose -f ../docker-compose.yml exec -T dgw sh -c '
+  test -w /data || { echo "FAIL: /data 不可写"; exit 1; }
+  test -w /logs || { echo "FAIL: /logs 不可写"; exit 1; }
+  test -r /config/env || { echo "FAIL: /config/env 不可读"; exit 1; }
+  test "$(stat -c %a /config/env)" = "600" || { echo "FAIL: /config/env 非 0600"; exit 1; }
+  echo "    OK: /data /logs 可写（dgw 属主）；/config/env 0600 只读挂载"
+'
+echo
 echo "✅ demo 验收通过：compose 起网关 + 启动自检通过 + 三挂载 + MCP 查询成功"
-echo "   三挂载确认：docker compose -f ../docker-compose.yml exec dgw ls -ld /data /logs /config"
 echo "   失败场景（拒启）：./fail-demo.sh"
+echo "   语义仓库操作路径：../semantic-repo/verify.sh"

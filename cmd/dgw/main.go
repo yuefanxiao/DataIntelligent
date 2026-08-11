@@ -176,7 +176,7 @@ func runStartupSelfCheck(cfg config.Config, router *db.Router) {
 	if err := router.SelfCheck(context.Background(), time.Duration(cfg.PGTimeoutMS)*time.Millisecond); err != nil {
 		log.Fatalf("启动自检失败（拒启）: %v", err)
 	}
-	log.Printf("启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效",
+	log.Printf("启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效 + current_database 与路由一致",
 		len(router.DBNames()))
 }
 
@@ -728,12 +728,13 @@ func cmdSelfCheck() {
 	defer router.Close()
 
 	names := router.DBNames()
-	for _, n := range names {
-		fmt.Printf("  校验 %s ...\n", n)
-	}
-	if err := router.SelfCheck(context.Background(), time.Duration(cfg.PGTimeoutMS)*time.Millisecond); err != nil {
+	err = router.SelfCheck(context.Background(), time.Duration(cfg.PGTimeoutMS)*time.Millisecond)
+	if err != nil {
 		log.Printf("启动自检失败（拒启）: %v", err)
 		os.Exit(1)
 	}
-	fmt.Printf("dgw: 启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效\n", len(names))
+	for _, n := range names {
+		fmt.Printf("  校验 %s：通过\n", n)
+	}
+	fmt.Printf("dgw: 启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效 + current_database 一致\n", len(names))
 }

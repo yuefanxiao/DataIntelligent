@@ -1,4 +1,4 @@
-# 共享只读角色 provisioning 指引（ADR-0004 §4.4 / ADR-0009 §4.8）
+# 共享只读角色 provisioning 指引（spec §4.4〔ADR-0004〕/ spec §4.8〔ADR-0009〕）
 
 网关/采集器**只用这个只读角色**连业务从库；超管凭证只在一次性
 provisioning 期间出现，**不进任何配置文件**（开发机/CI 零凭证，
@@ -53,4 +53,10 @@ provisioning 期间出现，**不进任何配置文件**（开发机/CI 零凭�
 - 网关 `DGW_PG_STATEMENT_TIMEOUT_MS` 与角色 `statement_timeout` **必须一致**
   ——启动自检硬校验，不一致拒启（防「网关以为自己有超时、角色没有」）。
 - 只读角色口令轮换 = 重跑脚本（`ALTER ROLE ... PASSWORD` 幂等）+ 更新
-  网关 env 文件 + 重启网关。
+  网关 env 文件 + 重启网关。口令经 psql 变量传入（`\set ro_password` /
+  `-v ro_password=...`），含引号/反斜杠的字符需按 psql 变量转义规则处理。
+- **v1 校验层只映射 public schema**（spec §8「v1 表均在 public schema」）：
+  bss 域表在生产库实际落 `schema <库名>` 前缀（采集器生产形态，本脚本的
+  GRANT 按此授权），但 v1 execute_sql 对非 public schema 的表会
+  `unknown_table` 拒绝——这是已知 v1 边界（查询侧），结构采集/授权按
+  生产形态（真相侧）不变；新表/漂移由采集器 `calibrate` 例行对照报告。

@@ -35,7 +35,8 @@
 ## 2. 语义仓库初始化（Gitea）
 
 见 [`semantic-repo/README.md`](semantic-repo/README.md)：
-`bootstrap.sh` 打通本地 clone 操作路径。
+`bootstrap.sh` 打通本地 clone 操作路径；`semantic-repo/verify.sh`
+全链路自动验证（采集 → 合入 → 同步 → revert 回滚）。
 
 ## 3. 网关配置（凭证只在这个文件）
 
@@ -103,4 +104,5 @@ cd deploy/demo && go run mcp-ping.go --addr http://127.0.0.1:8080/mcp \
   与部署形态（三挂载 + 凭证边界 + restart unless-stopped）；
 - `provisioning/readonly-role.sql` —— 共享只读角色（可重放 SQL）；
 - `semantic-repo/bootstrap.sh` —— 语义仓库本地 clone 操作路径；
+- `semantic-repo/verify.sh` —— 操作路径全链路自动化验证；
 - 启动自检（`internal/db/selfcheck.go` + `dgw selfcheck` + serve 拒启）。
