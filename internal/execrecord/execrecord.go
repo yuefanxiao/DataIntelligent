@@ -23,8 +23,10 @@ package execrecord
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -199,8 +201,8 @@ func (l *Logger) Close() error {
 	return nil
 }
 
-// write 是统一落盘路径：互斥锁下 轮转检查（跨日 → 聚合前一日 + 换日文件 +
-// 保留期清理）→ JSONL 追加。
+// write 是统一落盘路径：互斥锁下 轮转检查（跨日 或 文件缺失（上次轮转
+// 失败残留）→ 聚合前一日 + 换日文件 + 保留期清理）→ JSONL 追加。
 func (l *Logger) write(ts time.Time, rec any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -208,7 +210,9 @@ func (l *Logger) write(ts time.Time, rec any) error {
 		return fmt.Errorf("执行记录器已关闭")
 	}
 	day := dayOf(ts)
-	if day != l.day {
+	// rawFile==nil 也触发轮转：上次轮转失败（l.day 保留旧日、文件未打开）
+	// 后，同日写入必须重试而非对 nil 句柄写（丢记录且不自愈）。
+	if day != l.day || l.rawFile == nil {
 		if err := l.rollover(day); err != nil {
 			return err
 		}
@@ -269,6 +273,11 @@ func (l *Logger) prune() error {
 	for _, e := range entries {
 		date, kind, ok := parseName(e.Name())
 		if !ok {
+			// 崩溃残留的摘要临时文件（CreateTemp 后、rename 前进程死亡）
+			// 顺带清理（无功能影响，仅防长期积累）。
+			if strings.HasPrefix(e.Name(), "summary-") && strings.HasSuffix(e.Name(), ".tmp") {
+				_ = os.Remove(filepath.Join(l.dir, e.Name()))
+			}
 			continue
 		}
 		if date == l.day {
@@ -312,6 +321,9 @@ func (l *Logger) prune() error {
 func (l *Logger) summarize(date string) error {
 	rawPath := filepath.Join(l.dir, rawName(date))
 	rawSize, err := fileSize(rawPath)
+	if os.IsNotExist(err) {
+		return nil // 原始文件缺失（外部清理/瞬态）：无记录可聚合，跳过不砖化
+	}
 	if err != nil {
 		return err
 	}
@@ -324,7 +336,9 @@ func (l *Logger) summarize(date string) error {
 			return nil // 幂等：原始文件自上次聚合以来无变化
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("读摘要 %s: %w", sumPath, err)
+		// 摘要不可读（目录/权限等持久毒物）：跳过不覆盖——不砖化记录器，
+		// 该日信号留在原始侧（raw 保留期内仍可查）。
+		return nil
 	}
 	agg, err := aggregateFile(rawPath)
 	if err != nil {
@@ -412,75 +426,22 @@ func aggregateFile(path string) (*dailySummary, error) {
 	}
 	kwCount := map[string]int{}
 
-	sc := bufio.NewScanner(f)
-	// 行可远超默认 64KB（execute_sql 的 SQL 原文无长度上限）——Scanner 默认
-	// 上限会让超长行永久中断聚合（记录器哑死），放宽到 16MB。
-	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	// 逐行读用 bufio.Reader（无行长度上限）：Scanner 默认 64KB/放宽上限都
+	// 会把超长行（execute_sql 的 SQL 原文无长度上限；stdio 形态可达）变成
+	// 聚合硬失败（记录器砖化）——Reader 按行切分天然无此失败模式（病态
+	// 超长行只消耗内存，且坏行跳过逻辑兜底）。
+	r := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			aggregateLine(sum, kwCount, line)
 		}
-		// 记录字段契约的单一事实源 = ToolCall（写入形态已平铺，解析直接
-		// 复用——无第二份字段清单）；kind 单独分派。
-		var kind struct {
-			Kind string `json:"kind"`
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("读原始文件 %s: %w", path, rerr)
 		}
-		if json.Unmarshal([]byte(line), &kind) != nil {
-			continue // 坏行跳过（尽力而为的信号源）
-		}
-		switch kind.Kind {
-		case KindToolCall:
-			var rec ToolCall
-			if json.Unmarshal([]byte(line), &rec) != nil {
-				continue
-			}
-			if sum.Date == "" {
-				sum.Date = dayOf(rec.TS)
-			}
-			st := sum.Calls[rec.Tool]
-			st.Calls++
-			switch rec.Status {
-			case StatusSuccess:
-				st.Success++
-				if rec.Rows != nil {
-					st.Rows += *rec.Rows
-				}
-				if rec.Truncated != nil && *rec.Truncated {
-					st.Truncated++
-				}
-			case StatusTimeout:
-				st.Timeout++
-			case StatusParseError:
-				st.ParseError++
-			default:
-				st.Rejected++
-			}
-			sum.Calls[rec.Tool] = st
-			if rec.Reject != nil {
-				sum.Rejects[rejectKey(rec.Reject)]++
-			}
-			if rec.Tool == "search_entities" {
-				if p, ok := rec.Params.(map[string]any); ok {
-					if q, ok := p["query"].(string); ok && q != "" {
-						kwCount[q]++
-					}
-				}
-			}
-		case KindAuthFailure:
-			var rec struct {
-				Reject *gwerr.Error `json:"reject"`
-			}
-			if json.Unmarshal([]byte(line), &rec) != nil || rec.Reject == nil {
-				continue
-			}
-			sum.Rejects[rejectKey(rec.Reject)]++
-		case KindKeyLifecycle:
-			// key 生命周期不是查询信号，不进聚合
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("读原始文件 %s: %w", path, err)
 	}
 
 	sum.Keywords = make([]keywordCount, 0, len(kwCount))
@@ -495,6 +456,71 @@ func aggregateFile(path string) (*dailySummary, error) {
 		return sum.Keywords[i].Keyword < sum.Keywords[j].Keyword
 	})
 	return sum, nil
+}
+
+// aggregateLine 聚合一行 JSONL（坏行/未知 kind 跳过——尽力而为的信号源）。
+// 记录字段契约的单一事实源 = ToolCall（写入形态已平铺，解析直接复用——
+// 无第二份字段清单）；kind 单独分派。
+func aggregateLine(sum *dailySummary, kwCount map[string]int, line []byte) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return
+	}
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(line, &kind) != nil {
+		return
+	}
+	switch kind.Kind {
+	case KindToolCall:
+		var rec ToolCall
+		if json.Unmarshal(line, &rec) != nil {
+			return
+		}
+		if sum.Date == "" {
+			sum.Date = dayOf(rec.TS)
+		}
+		st := sum.Calls[rec.Tool]
+		st.Calls++
+		switch rec.Status {
+		case StatusSuccess:
+			st.Success++
+			if rec.Rows != nil {
+				st.Rows += *rec.Rows
+			}
+			if rec.Truncated != nil && *rec.Truncated {
+				st.Truncated++
+			}
+		case StatusTimeout:
+			st.Timeout++
+		case StatusParseError:
+			st.ParseError++
+		default:
+			st.Rejected++
+		}
+		sum.Calls[rec.Tool] = st
+		if rec.Reject != nil {
+			sum.Rejects[rejectKey(rec.Reject)]++
+		}
+		if rec.Tool == "search_entities" {
+			if p, ok := rec.Params.(map[string]any); ok {
+				if q, ok := p["query"].(string); ok && q != "" {
+					kwCount[q]++
+				}
+			}
+		}
+	case KindAuthFailure:
+		var rec struct {
+			Reject *gwerr.Error `json:"reject"`
+		}
+		if json.Unmarshal(line, &rec) != nil || rec.Reject == nil {
+			return
+		}
+		sum.Rejects[rejectKey(rec.Reject)]++
+	case KindKeyLifecycle:
+		// key 生命周期不是查询信号，不进聚合
+	}
 }
 
 // rejectKey 是「被拒原因」的聚合键：details.reason 优先（机器可区分的拒绝

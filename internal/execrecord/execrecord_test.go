@@ -450,6 +450,81 @@ func TestRolloverSelfHeal(t *testing.T) {
 	}
 }
 
+// 收敛轮 2（P2）：轮转失败后「l.day 保留 + rawFile=nil」状态下，同日晚到
+// 记录也要触发重试（write 条件 day!=l.day || rawFile==nil），而不是对 nil
+// 句柄写丢记录。
+func TestRolloverSelfHealSameDay(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	// 让 d1 原始文件不可读 → 首次跨日写入失败（状态：l.day=d1, rawFile=nil）
+	raw := filepath.Join(dir, "raw-2026-08-11.jsonl")
+	if err := os.Chmod(raw, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err == nil {
+		t.Fatal("摘要失败应返回错误")
+	}
+	// 恢复可读后，同日晚到记录（d2）重试轮转成功——不自愈盲区
+	if err := os.Chmod(raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatalf("同日晚到记录应触发重试自愈: %v", err)
+	}
+	if got := len(readLines(t, filepath.Join(dir, "raw-2026-08-12.jsonl"))); got != 1 {
+		t.Fatalf("d2 记录数 = %d，期望 1", got)
+	}
+}
+
+// 收敛轮 2（P2）：毒物文件（目录/权限异常命名为 raw-*/summary-*）不得砖化
+// 记录器——摘要不可读时跳过不覆盖，后续写入照常。
+func TestPoisonSummaryFileDoesNotBrick(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	// 用目录占住摘要路径（毒物：ReadFile 得 EISDIR）
+	if err := os.Mkdir(filepath.Join(dir, "summary-2026-08-11.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatalf("毒物摘要文件不应砖化记录器: %v", err)
+	}
+	if got := len(readLines(t, filepath.Join(dir, "raw-2026-08-12.jsonl"))); got != 1 {
+		t.Fatalf("d2 记录数 = %d，期望 1（写入照常）", got)
+	}
+}
+
+// 收敛轮 2（P3）：崩溃残留的摘要临时文件（*.tmp）在保留期清理时顺带删除。
+func TestTmpCleanup(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	leftover := filepath.Join(dir, "summary-2026-08-11.jsonl.abc123.tmp")
+	if err := os.WriteFile(leftover, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 触发跨日轮转（保留期清理路径）
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("崩溃残留临时文件应被清理")
+	}
+}
+
 // ── 聚合摘要（喂知识采集信号：被拒查询分布 / 原料路径 / 搜索关键词）───────
 
 // 摘要内容：各工具调用分布（总/成功/拒绝/超时/解析失败/行数/截断）、
