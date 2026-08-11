@@ -28,6 +28,7 @@ Status: open
 - [01 Research: MCP Go SDK 选型与协议能力](https://github.com/yuefanxiao/DataIntelligent/issues/2) — 推荐官方 modelcontextprotocol/go-sdk v1.7.0+（唯一双协议时代 Go SDK：自动协商 2025-11-25/2026-07-28，内置 RequireBearerToken 认证中间件、conformance 套件、GitHub 官方生产验证）；mark3labs/mcp-go（协议停在 2025-11-25）作备选。需自实现：TokenVerifier、权限引擎（联动 03）、SQL 只读强制/限额/脱敏、审计落库。
 - [06 Research: 语义层存储与检索方向](https://github.com/yuefanxiao/DataIntelligent/issues/7) — 语义层是 MB 级元数据（与业务数据量无关）；PG 原生（表 + JSONB + pgvector）作运行时存储 + YAML 文件作作者入口（自研 Go 编译/同步管线）；检索以结构化 SQL + 关键词为主，v1 跳过 embedding（免模型基建与数据出境）；v1 不引入图数据库（多跳遍历用关系边表 + WITH RECURSIVE）。
 - [09 Research: 开源方案现状对比（含高 star 项目）](https://github.com/yuefanxiao/DataIntelligent/issues/10) — 无现成开源项目等价于 Enterprise Data Context Layer：OpenMetadata（context + RBAC + 审计 + MCP，但不做 SQL 执行）与 Wren AI（语义引擎 + 受管 Text2SQL + MCP，OSS 缺企业权限/审计）各占一半；Vanna 已归档、pgai 停维护、MindsDB 转向 → 自研薄 Go 工具层方向成立，语义语法借鉴 MDL/MetricFlow（票据 05 参考），guardrails 借鉴 Wren（票据 10 参考），不选型任何项目作执行引擎。
+- [05 语义层本体模型：MDL vs 自研、v1 最小集合](https://github.com/yuefanxiao/DataIntelligent/issues/6) — 混合本体：UModel 式 sets-and-links 图谱承载服务↔库↔表↔列↔概念拓扑 + OSI 式声明式 SQL 指标挂载，自研补枚举取值语义与服务↔库映射；消费=工具发现为主(P2)+模糊检索(P3)+公式机器可读/dry-run(light P5)，概念与指标双入口；六类实体 + 四种关系边(connects_to/contains/references/describes) + 枚举挂列 + is_time；Database 粒度=PG database；无指标走表/列原料路径，新指标=人工确认回写 YAML（指标沉淀）；解封 07/08/12，输出 10（表达式可读+dry-run）、03（FQN 权限挂载点）、02（有界返回）。
 
 ## Not yet specified
 
