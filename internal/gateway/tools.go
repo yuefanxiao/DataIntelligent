@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -102,9 +103,14 @@ func registerTools(s *mcp.Server, g *Gateway) {
 		Annotations: readOnly(),
 	}, stub[listEnumValuesInput]("list_enum_values"))
 
+	// 并发闸数值动态注入（env 可配，Agent 侧描述与实际配置一致；
+	// New 保证 loadGate 恒非 nil）。
+	perKey, processTotal := g.loadGate.Limits()
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "execute_sql",
-		Description: "执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。",
+		Name: "execute_sql",
+		Description: fmt.Sprintf(
+			"执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。并发闸：每 key %d / 进程级 %d 同时查询，超限 rate_limited 快速拒绝（不排队）。",
+			perKey, processTotal),
 		Annotations: readOnly(),
 	}, g.handleExecuteSQL)
 }

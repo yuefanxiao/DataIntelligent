@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,16 +27,20 @@ func (g *Gateway) HTTPHandler() http.Handler {
 // verifyToken 是 go-sdk auth.TokenVerifier：对凭据表做 sha256 哈希比对。
 // 未命中 → ErrInvalidToken（401）；存储故障 → 其他错误（500）。
 // opaque key 无过期（ADR-0004：v1 无过期策略），middleware 需开
-// AllowMissingExpiration。
+// AllowMissingExpiration。UserID 进 TokenInfo（会话防劫持/审计）；
+// key_id（凭据行 ID）进 Extra 供每 key 并发闸计粒度（KeyFromContext）。
 func (g *Gateway) verifyToken(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-	userID, err := credentials.Verify(ctx, g.store.DB(), token)
+	k, err := credentials.VerifyKey(ctx, g.store.DB(), token)
 	if err != nil {
 		if errors.Is(err, credentials.ErrInvalidKey) {
 			return nil, auth.ErrInvalidToken
 		}
 		return nil, fmt.Errorf("verify key: %w", err)
 	}
-	return &auth.TokenInfo{UserID: userID}, nil
+	return &auth.TokenInfo{
+		UserID: k.UserID,
+		Extra:  map[string]any{"key_id": strconv.FormatInt(k.ID, 10)},
+	}, nil
 }
 
 // structuredAuth 用 SDK 中间件做认证（其 401/会话防劫持语义原样保留），

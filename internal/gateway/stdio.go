@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,13 +21,16 @@ func (g *Gateway) ServeStdio(ctx context.Context, apiKey string) error {
 
 // serveKeyed 是 ServeStdio 的传输可注入形态（测试用 IOTransport 走同一路径）。
 func (g *Gateway) serveKeyed(ctx context.Context, apiKey string, transport mcp.Transport) error {
-	userID, err := credentials.Verify(ctx, g.store.DB(), apiKey)
+	k, err := credentials.VerifyKey(ctx, g.store.DB(), apiKey)
 	if err != nil {
 		if errors.Is(err, credentials.ErrInvalidKey) {
 			return fmt.Errorf("serve-stdio: %s 缺失或无效（请先用 dgw key-create 创建并 export）", config.EnvAPIKey)
 		}
 		return fmt.Errorf("serve-stdio: verify key: %w", err)
 	}
-	ctx = withUserID(ctx, userID)
+	// 整条连接以该 key 的身份服务（调试形态单 key 单进程）：用户身份供审计，
+	// key 身份供每 key 并发闸（与 HTTP 形态粒度一致）。
+	ctx = withUserID(ctx, k.UserID)
+	ctx = withKeyID(ctx, strconv.FormatInt(k.ID, 10))
 	return g.server.Run(ctx, transport)
 }

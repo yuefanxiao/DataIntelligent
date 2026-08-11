@@ -15,7 +15,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/authz"
+	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
+	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -31,17 +33,22 @@ const authzReloadInterval = 5 * time.Second
 
 // Gateway 是一个网关实例：持有运行时存储、授权服务与 MCP server。
 type Gateway struct {
-	store   *store.Store
-	authz   *authz.Service
-	server  *mcp.Server
-	execSQL *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	store    *store.Store
+	authz    *authz.Service
+	server   *mcp.Server
+	execSQL  *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	loadGate *loadgate.Gate  // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
 }
 
-// Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04 票接线）。
+// Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04/05 票接线）。
 type Option func(*options)
 
 type options struct {
 	execSQL *executeSQLDeps
+	// 并发闸原始数值（WithLoadGate 注入；New 统一校验——与 WithExecuteSQL
+	// 的限额校验同一惯例；gateSet=false 取 spec 默认 2/8）。
+	gateSet               bool
+	gatePerKey, gateTotal int
 }
 
 // executeSQLDeps 是 execute_sql 的运行时依赖：PG 路由 + 行数限额。
@@ -50,11 +57,9 @@ type executeSQLDeps struct {
 	limit  int
 }
 
-// 行数限额范围（spec §4.9 参数表：默认 500 / 硬上限 5000）。
-const (
-	sqlLimitDefault = 500
-	sqlLimitMax     = 5000
-)
+// 行数限额范围（spec §4.9 参数表：默认 500 / 硬上限 5000；下限即默认值，
+// 与 config 包同一事实源）。
+const sqlLimitMax = 5000
 
 // WithExecuteSQL 注入 execute_sql 的 PG 路由与行数限额（spec §4.9「env 可
 // 覆盖」：默认 500，硬上限 5000 不可配置超过）。未调用时 execute_sql 返回
@@ -65,9 +70,19 @@ func WithExecuteSQL(router *db.Router, limit int) Option {
 	}
 }
 
+// WithLoadGate 注入并发闸数值（spec §4.9「env 可覆盖」：每 key 并发上限 /
+// 进程级总并发上限；默认 2/8）。数值非法（<1 或进程级 < 每 key）由 New
+// 校验 = 启动失败（配置错误 fail fast）。
+func WithLoadGate(perKey, total int) Option {
+	return func(o *options) {
+		o.gateSet = true
+		o.gatePerKey, o.gateTotal = perKey, total
+	}
+}
+
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
-// 限额越界（<500 或 >5000）= 启动失败（配置错误 fail fast）。
+// 限额越界 / 并发闸数值非法 = 启动失败（配置错误 fail fast）。
 func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
@@ -83,12 +98,22 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 	for _, opt := range opts {
 		opt(&o)
 	}
+	// 并发闸恒启用（负载防护不缺席）：数值在此统一校验（option 只存数据，
+	// New 校验上报——与 WithExecuteSQL 限额同一惯例）；未注入取 spec 默认。
+	perKey, total := config.DefaultKeyConcurrency, config.DefaultProcessConcurrency
+	if o.gateSet {
+		perKey, total = o.gatePerKey, o.gateTotal
+	}
+	var err error
+	if g.loadGate, err = loadgate.New(perKey, total); err != nil {
+		return nil, err
+	}
 	g.execSQL = o.execSQL
 	if g.execSQL != nil && g.execSQL.router == nil {
 		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
 	}
-	if g.execSQL != nil && (g.execSQL.limit < sqlLimitDefault || g.execSQL.limit > sqlLimitMax) {
-		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, sqlLimitDefault, sqlLimitMax)
+	if g.execSQL != nil && (g.execSQL.limit < config.DefaultSQLLimit || g.execSQL.limit > sqlLimitMax) {
+		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, config.DefaultSQLLimit, sqlLimitMax)
 	}
 
 	if err := g.authz.Load(context.Background()); err != nil {
@@ -135,6 +160,32 @@ func UserFromContext(ctx context.Context) (string, bool) {
 	}
 	if ti := auth.TokenInfoFromContext(ctx); ti != nil && ti.UserID != "" {
 		return ti.UserID, true
+	}
+	return "", false
+}
+
+// keyIDContextKey 是凭据 key 身份（每 key 并发闸粒度）的上下文键，
+// 来源与 userIDContextKey 对应：stdio 预置 / HTTP 经 TokenInfo.Extra。
+type keyIDContextKey struct{}
+
+func withKeyID(ctx context.Context, keyID string) context.Context {
+	return context.WithValue(ctx, keyIDContextKey{}, keyID)
+}
+
+// KeyFromContext 返回当前调用绑定的凭据 key 身份（ADR-0004 key→用户扁平
+// 映射：一用户多 key，每 key 独立计数）：
+//   - stdio 形态：ServeStdio 预置（withKeyID，进程的 key）；
+//   - HTTP 形态：verifyToken 写入 auth.TokenInfo.Extra["key_id"]。
+//
+// 未认证的调用返回 "", false。
+func KeyFromContext(ctx context.Context) (string, bool) {
+	if keyID, ok := ctx.Value(keyIDContextKey{}).(string); ok && keyID != "" {
+		return keyID, true
+	}
+	if ti := auth.TokenInfoFromContext(ctx); ti != nil {
+		if keyID, ok := ti.Extra["key_id"].(string); ok && keyID != "" {
+			return keyID, true
+		}
 	}
 	return "", false
 }

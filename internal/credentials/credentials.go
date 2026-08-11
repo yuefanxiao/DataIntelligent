@@ -57,23 +57,25 @@ func Create(ctx context.Context, db *sql.DB, userID string) (string, error) {
 	return plain, nil
 }
 
-// Verify 校验明文凭据：哈希比对命中且未吊销则返回绑定用户；否则 ErrInvalidKey。
-func Verify(ctx context.Context, db *sql.DB, plaintext string) (string, error) {
-	var userID string
+// VerifyKey 校验明文凭据：哈希比对命中且未吊销则返回该 key 的记录
+// （ID = 每 key 并发闸的粒度标识，ADR-0004 key→用户扁平映射——
+// 一用户多 key，各 key 独立计数）；否则 ErrInvalidKey。
+func VerifyKey(ctx context.Context, db *sql.DB, plaintext string) (KeyInfo, error) {
+	var k KeyInfo
 	var revokedAt sql.NullString
 	err := db.QueryRowContext(ctx,
-		"SELECT user_id, revoked_at FROM dgw_credentials WHERE key_hash = ?",
-		Hash(plaintext)).Scan(&userID, &revokedAt)
+		"SELECT id, user_id, revoked_at FROM dgw_credentials WHERE key_hash = ?",
+		Hash(plaintext)).Scan(&k.ID, &k.UserID, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInvalidKey
+		return KeyInfo{}, ErrInvalidKey
 	}
 	if err != nil {
-		return "", fmt.Errorf("lookup key: %w", err)
+		return KeyInfo{}, fmt.Errorf("lookup key: %w", err)
 	}
 	if revokedAt.Valid {
-		return "", ErrInvalidKey
+		return KeyInfo{}, ErrInvalidKey
 	}
-	return userID, nil
+	return k, nil
 }
 
 // KeyInfo 是快照视图里的一把 key（明文不存在，哈希即身份标识）。

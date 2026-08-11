@@ -106,12 +106,12 @@ func TestCreateVerifyRoundtrip(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	userID, err := Verify(ctx, s.DB(), plain)
+	k, err := VerifyKey(ctx, s.DB(), plain)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if userID != "dev-alice" {
-		t.Errorf("userID = %q, want %q", userID, "dev-alice")
+	if k.UserID != "dev-alice" {
+		t.Errorf("userID = %q, want %q", k.UserID, "dev-alice")
 	}
 }
 
@@ -130,8 +130,8 @@ func TestMultipleKeysSameUser(t *testing.T) {
 	}
 
 	for _, k := range []string{k1, k2} {
-		if userID, err := Verify(ctx, s.DB(), k); err != nil || userID != "dev-alice" {
-			t.Errorf("Verify(%q) = %q, %v；want dev-alice, nil", k, userID, err)
+		if kk, err := VerifyKey(ctx, s.DB(), k); err != nil || kk.UserID != "dev-alice" {
+			t.Errorf("VerifyKey(%q) = %q, %v；want dev-alice, nil", k, kk.UserID, err)
 		}
 	}
 }
@@ -140,7 +140,7 @@ func TestVerifyRejectsUnknownKey(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	if _, err := Verify(ctx, s.DB(), Prefix+"not-a-real-key"); !errors.Is(err, ErrInvalidKey) {
+	if _, err := VerifyKey(ctx, s.DB(), Prefix+"not-a-real-key"); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("错误 = %v, want ErrInvalidKey", err)
 	}
 }
@@ -166,8 +166,8 @@ func TestVerifyAcrossReopen(t *testing.T) {
 	}
 	defer s2.Close()
 
-	if userID, err := Verify(ctx, s2.DB(), plain); err != nil || userID != "dev-bob" {
-		t.Errorf("重开后 Verify = %q, %v；want dev-bob, nil", userID, err)
+	if k, err := VerifyKey(ctx, s2.DB(), plain); err != nil || k.UserID != "dev-bob" {
+		t.Errorf("重开后 VerifyKey = %q, %v；want dev-bob, nil", k.UserID, err)
 	}
 }
 
@@ -192,7 +192,7 @@ func TestRevokeImmediateAndIdempotent(t *testing.T) {
 	if err != nil || !revoked {
 		t.Fatalf("首次吊销 = %v, %v；want true, nil", revoked, err)
 	}
-	if _, err := Verify(ctx, s.DB(), plain); !errors.Is(err, ErrInvalidKey) {
+	if _, err := VerifyKey(ctx, s.DB(), plain); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("吊销后 Verify = %v, want ErrInvalidKey", err)
 	}
 
@@ -238,7 +238,7 @@ func TestRevokePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s2.Close()
-	if _, err := Verify(ctx, s2.DB(), plain); !errors.Is(err, ErrInvalidKey) {
+	if _, err := VerifyKey(ctx, s2.DB(), plain); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("重开后 Verify = %v, want ErrInvalidKey", err)
 	}
 }
