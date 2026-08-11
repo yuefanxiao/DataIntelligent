@@ -103,6 +103,92 @@ CREATE TABLE IF NOT EXISTS dgw_permission_meta (
 );
 INSERT INTO dgw_permission_meta (id, revision) VALUES (1, 0)
     ON CONFLICT(id) DO NOTHING;
+
+-- ===== 语义层运行时表（07 票，ADR-0001/0005）=====
+-- 六类实体（service/database/table/column/metric/concept）统一存一张表，
+-- kind 区分类型；类型专属字段按 kind 使用（其余为 NULL）。
+-- FQN 即稳定标识（ADR-0001）：服务 / 服务.库 / 服务.库.表 / 服务.库.表.列，
+-- 指标与概念用独立命名空间（单段名字，全局唯一）。表 FQN（服务.库.表）与
+-- dgw_table_grants.table_fqn 同一命名空间 = 权限挂载点（ADR-0004）。
+-- tombstone=1 = 墓碑软删除（ADR-0002 墓碑语义，检索默认过滤）。
+CREATE TABLE IF NOT EXISTS dgw_sem_entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fqn         TEXT NOT NULL UNIQUE,      -- 稳定 FQN（全 kind 唯一）
+    kind        TEXT NOT NULL CHECK (kind IN ('service','database','table','column','metric','concept')),
+    name        TEXT NOT NULL,             -- 实体短名（FQN 末段，冗余便于检索）
+    description TEXT NOT NULL DEFAULT '',
+    -- column 专属：
+    data_type   TEXT,                      -- PG 数据类型（列）
+    is_time     INTEGER NOT NULL DEFAULT 0,-- 时间轴标注（列，1 = 是时间列）
+    -- table 专属：
+    pg_schema   TEXT,                      -- PG schema（表；缺省 = 按 dbname 路由推断）
+    -- metric 专属（machine-readable 口径，ADR-0001 OSI 式）：
+    expression  TEXT,                      -- SQL 表达式
+    aggregation TEXT,                      -- 聚合方式
+    filter      TEXT,                      -- 过滤条件
+    tombstone   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sem_entities_kind ON dgw_sem_entities (kind);
+CREATE INDEX IF NOT EXISTS idx_sem_entities_tombstone ON dgw_sem_entities (tombstone);
+
+-- 四种关系边（双向可遍历：按 src 或 dst 都能查）：connects_to（服务↔库）、
+-- contains（库→表、表→列）、references（表↔表 join 条件）、describes
+-- （概念↔表/列/指标，指标→其依赖表也用本类型）。
+-- meta 存边专属信息（references 的 on 条件），JSON 文本。
+CREATE TABLE IF NOT EXISTS dgw_sem_relations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    type       TEXT NOT NULL CHECK (type IN ('connects_to','contains','references','describes')),
+    src_fqn    TEXT NOT NULL,
+    dst_fqn    TEXT NOT NULL,
+    meta       TEXT NOT NULL DEFAULT '',
+    tombstone  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (type, src_fqn, dst_fqn)
+);
+CREATE INDEX IF NOT EXISTS idx_sem_relations_src ON dgw_sem_relations (src_fqn);
+CREATE INDEX IF NOT EXISTS idx_sem_relations_dst ON dgw_sem_relations (dst_fqn);
+
+-- 列枚举取值（list_enum_values 的数据来源；挂列 = column_fqn）。
+CREATE TABLE IF NOT EXISTS dgw_sem_enum_values (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    column_fqn TEXT NOT NULL,              -- 服务.库.表.列
+    value      TEXT NOT NULL,              -- 枚举取值（如 'failed'）
+    label      TEXT NOT NULL DEFAULT '',   -- 业务含义（如 支付失败）
+    tombstone  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (column_fqn, value)
+);
+
+-- 实体向量（search_entities 向量兜底；07 只写入，08 票接 sqlite-vec/暴力余弦）。
+-- vector = float32 小端序列（1536 维 × 4 字节）。
+--
+-- 决策记录（07 票，ADR-0005 的落地偏差）：ADR-0005 选定 sqlite-vec vec0
+-- 虚拟表做 KNN，但 modernc.org/sqlite v1.42.2 不含内置 vec（v1.47.0+ 才有）；
+-- 07 只承担「写入向量」，检索在 08 票，故先用普通表 BLOB 落库。BLOB 的
+-- float32 小端序列与 sqlite-vec 内部格式字节兼容——08 票升级驱动后迁移 =
+-- INSERT INTO vec0 SELECT（或直接暴力余弦），无需重嵌入。不升级到 v1.50 的
+-- 原因：依赖大跳版本（libc 等间接依赖）、02-05 票回归面未知，且 07 无
+-- 检索消费方。此偏差不修改 ADR-0005 正文（08 票按 ADR 落地时执行迁移）。
+CREATE TABLE IF NOT EXISTS dgw_sem_embeddings (
+    entity_fqn TEXT PRIMARY KEY,
+    model      TEXT NOT NULL,              -- 如 text-embedding-3-small
+    vector     BLOB NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+-- 服务/库级通配授权声明（ADR-0004 语法糖）：grants-apply 展开为具体表清单
+-- 快照写入 dgw_table_grants，同时保留声明——同步管线（07）据此告警「新表
+-- 未覆盖」（新表默认拒绝，重展开 = 重跑 grants-apply）。全库通配 * 不开放。
+CREATE TABLE IF NOT EXISTS dgw_grant_patterns (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  TEXT NOT NULL,
+    pattern  TEXT NOT NULL,                -- service:XXX 或 database:XXX.YYY
+    UNIQUE (user_id, pattern)
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)

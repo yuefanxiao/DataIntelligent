@@ -1,0 +1,24 @@
+# 全局指标（样例）——OSI 式口径：expression + aggregation + filter 机器可读。
+#
+# 约定：
+#   - 指标 FQN = 单段名字（独立命名空间，全局唯一）；
+#   - expression = SQL 表达式（编译期校验可解析，ADR-0001）；
+#   - filter = 固定过滤条件（编译期校验可解析；时间过滤是查询参数，不进定义）；
+#   - tables = 指标依赖的底层表（describes 边 + 指标授权展开的依据——
+#     grants YAML 里 metric:xxx 授权会展开为这些表的授权，杜绝悬空）。
+version: 1
+metrics:
+  - name: payment_failure_rate
+    description: 支付失败率——支付状态为 failed 的支付单占全部支付单的比例
+    expression: "COUNT(*) FILTER (WHERE status = 'failed')::numeric / NULLIF(COUNT(*), 0)"
+    aggregation: ratio
+    filter: ""
+    tables:
+      - payment-service.payment_db.payments
+  - name: payment_gmv
+    description: 支付总额（GMV）——成功支付的金额合计
+    expression: "COALESCE(SUM(amount), 0)"
+    aggregation: sum
+    filter: "status = 'succeeded'"
+    tables:
+      - payment-service.payment_db.payments
