@@ -19,6 +19,7 @@ import (
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
+	"github.com/yuefanxiao/DataIntelligent/internal/semantic"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -34,21 +35,23 @@ const authzReloadInterval = 5 * time.Second
 
 // Gateway 是一个网关实例：持有运行时存储、授权服务与 MCP server。
 type Gateway struct {
-	store    *store.Store
-	authz    *authz.Service
-	server   *mcp.Server
-	execSQL  *executeSQLDeps    // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
-	loadGate *loadgate.Gate     // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
-	execlog  *execrecord.Logger // 执行记录（06 票；nil = 不记录）
-	logger   *slog.Logger       // 网关日志（执行记录写入失败等兜底输出）
+	store       *store.Store
+	authz       *authz.Service
+	server      *mcp.Server
+	execSQL     *executeSQLDeps    // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	loadGate    *loadgate.Gate     // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
+	execlog     *execrecord.Logger // 执行记录（06 票；nil = 不记录）
+	searchEmbed semantic.Embedder  // search_entities 向量通道（08 票；nil = 纯关键词检索）
+	logger      *slog.Logger       // 网关日志（执行记录写入失败等兜底输出）
 }
 
 // Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04/05 票接线）。
 type Option func(*options)
 
 type options struct {
-	execSQL *executeSQLDeps
-	execlog *execrecord.Logger
+	execSQL     *executeSQLDeps
+	execlog     *execrecord.Logger
+	searchEmbed semantic.Embedder
 	// 并发闸原始数值（WithLoadGate 注入；New 统一校验——与 WithExecuteSQL
 	// 的限额校验同一惯例；gateSet=false 取 spec 默认 2/8）。
 	gateSet               bool
@@ -90,6 +93,14 @@ func WithExecLog(l *execrecord.Logger) Option {
 	return func(o *options) { o.execlog = l }
 }
 
+// WithSearchEmbed 注入 search_entities 的查询侧 embedding（08 票；
+// spec §4.9「embedding 模型 OpenAI text-embedding-3」）：查询文本嵌入后
+// 走 vec0 KNN，与 FTS5 关键词做加权 RRF 融合。nil = 向量通道关闭，检索
+// 退化为纯关键词（向量是兜底通道，缺失不阻断主通道，ADR-0002）。
+func WithSearchEmbed(emb semantic.Embedder) Option {
+	return func(o *options) { o.searchEmbed = emb }
+}
+
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
 // 限额越界 / 并发闸数值非法 = 启动失败（配置错误 fail fast）。
@@ -124,6 +135,7 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 		return nil, err
 	}
 	g.execSQL = o.execSQL
+	g.searchEmbed = o.searchEmbed
 	if g.execSQL != nil && g.execSQL.router == nil {
 		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
 	}

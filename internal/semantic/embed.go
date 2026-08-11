@@ -3,12 +3,15 @@ package semantic
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +40,10 @@ type OpenAIEmbedder struct {
 // （OpenAI 真实模型 id，1536 维；spec §4.9 参数表写的「text-embedding-3」
 // 是系列名简写，不是可调用的模型 id）。
 const DefaultEmbeddingModel = "text-embedding-3-small"
+
+// DefaultVectorDim 是 DefaultEmbeddingModel 的向量维度（vec0 索引的初始
+// 维度，与 store 包 schema 一致；模型切换由 EnsureVecIndex 检测重建）。
+const DefaultVectorDim = 1536
 
 // NewOpenAIEmbedder 构造 OpenAI embedding 客户端（env DGW_OPENAI_API_KEY）。
 // model 缺省 DefaultEmbeddingModel（spec §4.9 参数表「env 可覆盖」）。
@@ -137,14 +144,29 @@ func embedEntity(e Entity) string {
 	return s
 }
 
-// SaveEmbeddings 把实体向量写入 dgw_sem_embeddings（幂等 upsert）。
+// SaveEmbeddings 把实体向量写入 dgw_sem_embeddings（幂等 upsert）并同步
+// 维护 vec0 检索索引（08 票，ADR-0005：双写，vec0 是 KNN 索引面）。vec0
+// 不支持 UPSERT/REPLACE（虚拟表限制），更新 = 先删后插。维度与索引不符
+// （模型切换）由 EnsureVecIndex 重建。双写在单事务内（review 修复：
+// 崩溃不留半态漂移窗口）。失败返回错误——调用方按「降级不阻塞」处理
+// （与 embedding 生成失败同一契约）。
 func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, vecs [][]float32) error {
 	if len(fqns) != len(vecs) {
 		return fmt.Errorf("SaveEmbeddings: %d 个 FQN vs %d 个向量", len(fqns), len(vecs))
 	}
+	if len(vecs) > 0 {
+		if err := EnsureVecIndex(ctx, st, len(vecs[0])); err != nil {
+			return err
+		}
+	}
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
 	for i, fqn := range fqns {
 		buf := encodeFloats(vecs[i])
-		if _, err := st.DB().ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO dgw_sem_embeddings (entity_fqn, model, vector)
 			VALUES (?, ?, ?)
 			ON CONFLICT(entity_fqn) DO UPDATE SET
@@ -153,9 +175,106 @@ func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, v
 			fqn, model, buf); err != nil {
 			return fmt.Errorf("save embedding %s: %w", fqn, err)
 		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM dgw_sem_vec WHERE entity_fqn = ?`, fqn); err != nil {
+			return fmt.Errorf("delete vec0 row %s: %w", fqn, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO dgw_sem_vec (entity_fqn, vector) VALUES (?, ?)`,
+			fqn, buf); err != nil {
+			return fmt.Errorf("save vec0 row %s: %w", fqn, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit embeddings: %w", err)
 	}
 	return nil
 }
+
+// EnsureVecIndex 确保 vec0 索引存在且维度与 dim 一致（08 票迁移/维护）：
+//   - dim ≤ 0（CLI 迁移路径未指定）：从存量向量推导维度（最长者；
+//     无存量取 DefaultVectorDim）——避免「CLI 硬编码默认维度 vs 实际
+//     模型维度」在非 1536 维模型（DGW_EMBEDDING_MODEL 切换）下反复
+//     重建索引（review 修复）；
+//   - 表缺失（历史库升级 / 从未同步过）→ 按 dim 建表 + 从 embeddings
+//     回填同维存量行（07 的 BLOB 与 sqlite-vec 字节兼容，无需重嵌入）；
+//   - 维度不符（模型切换 → 全量重嵌走 SaveEmbeddings，首条新向量触发
+//     重建）→ DROP + 重建 + 回填同维行。
+//
+// 幂等：维度一致 = 无操作。失败返回错误（调用方降级：检索退化为纯关键词，
+// 与「向量是兜底通道」的定位一致）。
+func EnsureVecIndex(ctx context.Context, st DBer, dim int) error {
+	if dim <= 0 {
+		dim = DefaultVectorDim
+		if d, err := maxVectorDim(ctx, st.DB()); err != nil {
+			return err
+		} else if d > 0 {
+			dim = d
+		}
+	}
+	cur, err := vecIndexDim(ctx, st.DB())
+	if err != nil {
+		return err
+	}
+	if cur == dim {
+		return nil
+	}
+	if _, err := st.DB().ExecContext(ctx, `DROP TABLE IF EXISTS dgw_sem_vec`); err != nil {
+		return fmt.Errorf("drop vec0: %w", err)
+	}
+	if _, err := st.DB().ExecContext(ctx,
+		fmt.Sprintf(`CREATE VIRTUAL TABLE dgw_sem_vec USING vec0(entity_fqn TEXT PRIMARY KEY, vector float[%d])`, dim)); err != nil {
+		return fmt.Errorf("create vec0(%d): %w", dim, err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `
+		INSERT INTO dgw_sem_vec (entity_fqn, vector)
+		SELECT entity_fqn, vector FROM dgw_sem_embeddings
+		WHERE length(vector) = ?`, dim*4); err != nil {
+		return fmt.Errorf("backfill vec0(%d): %w", dim, err)
+	}
+	return nil
+}
+
+// maxVectorDim 返回存量向量的最大维度（无向量 = 0）。推导依据：模型切换
+// 后全量重嵌，新模型维度是当前事实源；混合维度期间取最大维（旧维行会被
+// 维度过滤排除在回填外）。
+func maxVectorDim(ctx context.Context, db *sql.DB) (int, error) {
+	var bytesLen sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT max(length(vector)) FROM dgw_sem_embeddings`).Scan(&bytesLen); err != nil {
+		return 0, fmt.Errorf("max embedding dim: %w", err)
+	}
+	if !bytesLen.Valid {
+		return 0, nil
+	}
+	return int(bytesLen.Int64) / 4, nil
+}
+
+// vecIndexDim 读 vec0 索引的当前维度（从 sqlite_master 的建表语句解析；
+// 表缺失 = 0）。vec0 是虚拟表，维度只在 DDL 里声明，无 SQL 元数据面可查。
+func vecIndexDim(ctx context.Context, db *sql.DB) (int, error) {
+	var sqlText string
+	err := db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dgw_sem_vec'`).Scan(&sqlText)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read vec0 definition: %w", err)
+	}
+	m := vecDimRe.FindStringSubmatch(sqlText)
+	if m == nil {
+		return 0, fmt.Errorf("parse vec0 definition: %q", sqlText)
+	}
+	dim, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("parse vec0 dim %q: %w", m[1], err)
+	}
+	return dim, nil
+}
+
+// vecDimRe 匹配 vec0 建表语句里的维度声明（float[N]）。
+var vecDimRe = regexp.MustCompile(`float\[(\d+)\]`)
 
 // encodeFloats 序列化 float32 切片为小端字节（存 BLOB）。
 func encodeFloats(v []float32) []byte {
@@ -236,7 +355,8 @@ func EmbeddingCoverage(ctx context.Context, st DBer, model string) (missing, mis
 }
 
 // RemoveEmbeddings 删除实体的向量（墓碑对应面：实体被墓碑化后其向量一并
-// 清理，检索不再命中死实体；幂等，可重复调用）。
+// 清理，检索不再命中死实体；幂等，可重复调用）。embeddings 与 vec0 双删
+// （08 票双写维护，索引面不留孤儿行），单事务内（review 修复）。
 func RemoveEmbeddings(ctx context.Context, st DBer, fqns []string) error {
 	if len(fqns) == 0 {
 		return nil
@@ -246,8 +366,20 @@ func RemoveEmbeddings(ctx context.Context, st DBer, fqns []string) error {
 	for i, f := range fqns {
 		args[i] = f
 	}
-	if _, err := st.DB().ExecContext(ctx, query, args...); err != nil {
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("remove embeddings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM dgw_sem_vec WHERE entity_fqn IN (?"+strings.Repeat(",?", len(fqns)-1)+")", args...); err != nil {
+		return fmt.Errorf("remove vec0 rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit remove embeddings: %w", err)
 	}
 	return nil
 }

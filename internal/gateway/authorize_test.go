@@ -52,8 +52,9 @@ func TestAuthorizeBusinessTableDefaultDeny(t *testing.T) {
 }
 
 // 双表面分界的行为证据：语义元数据面（认证即读）不因「无表授权」受影响——
-// 语义工具在零授权环境下调用返回 stub 的 not_implemented，而不是
-// permission_denied（表级授权只在 execute_sql 路径上）。
+// 语义工具在零授权环境下：search_entities 成功（零命中），其余四工具
+// 返回实体不存在的 invalid_request/not_found——绝不出现 permission_denied
+// （表级授权只在 execute_sql 路径上）。
 func TestSemanticSurfaceSkipsTableAuthz(t *testing.T) {
 	g, st := newTestGateway(t)
 	key := createKey(t, st, "dev-alice")
@@ -84,9 +85,19 @@ func TestSemanticSurfaceSkipsTableAuthz(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CallTool(%s): %v", tool, err)
 		}
+		if tool == "search_entities" {
+			// 认证即读的正面证据：零授权也放行（空语义库零命中 = 成功）。
+			if res == nil || res.IsError {
+				t.Errorf("search_entities 零授权下应成功: %+v", res)
+			}
+			continue
+		}
 		e := decodeErrorResult(t, res)
-		if e.Kind != gwerr.KindNotImplemented {
-			t.Errorf("语义工具 %s 零授权下错误 = %s, want not_implemented（不得出现 permission_denied）", tool, e.Kind)
+		if e.Kind == gwerr.KindPermission {
+			t.Errorf("语义工具 %s 零授权下返回 permission_denied——语义元数据面认证即读", tool)
+		}
+		if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "not_found" {
+			t.Errorf("语义工具 %s 零授权下错误 = %s [%v], want invalid_request/not_found（实体不存在）", tool, e.Kind, e.Details["reason"])
 		}
 	}
 }
