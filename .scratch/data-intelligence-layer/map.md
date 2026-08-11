@@ -30,6 +30,8 @@
 - [03 权限模型：粒度、API key 机制与维护方](https://github.com/yuefanxiao/DataIntelligent/issues/4) — 双表面授权：execute_sql 默认拒绝（表级 FQN 白名单；指标/概念授权编译期展开为表授权；不可解析/未知表一律拒绝），语义元数据面认证即读；key→用户扁平 grants（opaque 随机串哈希存储、一用户多 key、吊销即时、v1 不设过期）；grants YAML + CLI 维护（编译进语义存储 PG 权限表、热重载）；服务/库级通配=作者入口语法糖、展开=快照（新表默认拒绝+管线告警+重展开确认，`*` 不开放）；PG 侧一个共享只读角色只保「物理不能写」（timeout/禁 SET ROLE），细粒度全在网关侧；v1 无管理员角色；列级/行级/掩码后置优化、管理工作台 v2。解封 12；输出 04（key→用户聚合）、10（解析器复用）、08（新表告警流程）。
 - [13 语义层运行时存储与检索：SQLite 轻量版](https://github.com/yuefanxiao/DataIntelligent/issues/14) — 修正 07 存储载体：v1 运行时存储 = SQLite 单文件（modernc 纯 Go 无 CGO、WAL、单写者管线+多读者网关、备份=文件拷贝），v1 唯一实现；向量=sqlite-vec（v1.47.0 起内置 CGO-free 移植，SQL 内 KNN，退路=Go 暴力余弦）；PG 仅作多机/HA 升级路径记入 ADR-0005（ADR-0002 加修正指针）；授权数据/权限表随载体落 SQLite；审计存储方向留输入给 04。不变：YAML 作者入口+同步管线+五条原语+RRF+OpenAI embedding+不引入图数据库；生产查询目标仍为 PG 从库。
 
+- [04 审计设计：记录内容、存储与保留期](https://github.com/yuefanxiao/DataIntelligent/issues/5) — 「审计」重构为**执行记录**：六工具全记 + 认证失败/拒绝 + key 生命周期（CLI 一行）的结构化 JSONL 日志（宿主机文件 + 轮转），字段契约 = 时间/用户/key/工具/参数（SQL 原文入库不脱敏，宿主机权限即访问边界）/分阶段耗时/状态/行数/truncated/plan_id/被拒原因；原始 ~7 天 + 聚合摘要 ~30 天；不做 SQLite 证据存储、不做 CLI 查询面、不接 OTel（安全证据仅合规政策驱动时按契约升级）；驱动 = 排障（statement_timeout 自愈 + psql 手动杀 + 日志事后查）+ tracing + 优化数据源（08 的信号：被拒查询/原料路径/搜索关键词）。解封 12；输出 08（字段契约）、10（超时/截断分布）、11（日志位置）；ADR-0006 修正 ADR-0005 的审计输入。
+
 ## Not yet specified
 
 - 权限后续优化：列级权限（拒绝/掩码）、行级 RLS、key 过期策略（03 决议后置，12 排期时定）
