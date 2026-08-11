@@ -52,7 +52,7 @@ dgw semantic-backup --out /backup/semantic-$(date +%F).db   # WAL checkpoint + �
 
 ## 校验（验收标准第 5 条：管线/采集器可对语义仓库操作）
 
-- 采集器 `--out` 指向 clone 的 `services/` → 草稿即仓库变更（git diff 可见）；
+- 采集器 `--out` 指向 clone 根 → 草稿落 clone 的 `services/`（git diff 可见）；
 - 同步管线 `--dir` 指向 clone → 编译校验原子拒绝 + dry-run diff + 幂等应用；
 - 本地无 Gitea 时可先用裸仓库模拟远端验证路径：
 
