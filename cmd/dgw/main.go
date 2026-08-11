@@ -33,6 +33,7 @@ import (
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/gateway"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
+	"github.com/yuefanxiao/DataIntelligent/internal/semantic"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -61,6 +62,10 @@ func main() {
 		cmdGrantsApply()
 	case "grants-snapshot":
 		cmdGrantsSnapshot()
+	case "semantic-sync":
+		cmdSemanticSync()
+	case "semantic-backup":
+		cmdSemanticBackup()
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -80,8 +85,10 @@ func usage() {
   dgw key-revoke --id ID [--db PATH]        吊销凭据：即时生效（ID 见 grants-snapshot）
   dgw grant-add --user USER --table FQN [--db PATH]     加一张表的授权（服务.库.表）
   dgw grant-remove --user USER --table FQN [--db PATH]  撤一张表的授权
-  dgw grants-apply --file PATH [--db PATH]  把 grants YAML 全量编译进权限表
+  dgw grants-apply --file PATH [--db PATH]  把 grants YAML 全量编译进权限表（指标/概念/通配授权经语义层展开）
   dgw grants-snapshot [--db PATH]           查看授权快照（key + 表授权）
+  dgw semantic-sync --dir DIR [--db PATH] [--dry-run]   语义同步管线：编译 → dry-run diff → 应用
+  dgw semantic-backup --out PATH [--db PATH] 运行时存储备份（WAL checkpoint + 文件拷贝）
 
 权限 CLI 仅限网关宿主机运行（能上宿主机 = 运维者，v1 无管理员角色）；
 grants YAML 是表授权的事实源（git review 即权限变更评审闸门），
@@ -303,12 +310,15 @@ func cmdGrantsApply() {
 	if err != nil {
 		log.Fatalf("解析 grants YAML 失败: %v", err)
 	}
-	res, err := grants.Sync(context.Background(), st, f)
+	// 语义层授权展开器（07 票接线）：指标/概念/服务/库级授权经语义库展开
+	// 为具体表清单；语义库未同步时展开失败 = 编译拒绝（杜绝悬空授权）。
+	expand := semantic.NewGrantExpander(st)
+	res, err := grants.Sync(context.Background(), st, f, expand)
 	if err != nil {
 		log.Fatalf("编译 grants YAML 进权限表失败: %v", err)
 	}
-	fmt.Printf("dgw: grants YAML 已编译进权限表（新增 %d 条 / 移除 %d 条，revision %d，热重载生效中）\n",
-		res.Added, res.Removed, res.Revision)
+	fmt.Printf("dgw: grants YAML 已编译进权限表（新增 %d 条 / 移除 %d 条 / 通配声明 %d 个，revision %d，热重载生效中）\n",
+		res.Added, res.Removed, res.Patterns, res.Revision)
 }
 
 func cmdGrantsSnapshot() {
@@ -353,4 +363,151 @@ func cmdGrantsSnapshot() {
 		log.Fatalf("读取 revision 失败: %v", err)
 	}
 	fmt.Printf("权限 revision: %d\n", rev)
+}
+
+// cmdSemanticSync 运行语义同步管线（ADR-0002）：编译校验 → dry-run diff →
+// 应用（幂等 upsert + 墓碑软删除）。--dry-run 只出 diff 不写库（§5.3 seam）。
+// embedding：DGW_OPENAI_API_KEY 存在时同步期生成向量，失败降级不阻塞。
+func cmdSemanticSync() {
+	fs := flag.NewFlagSet("semantic-sync", flag.ExitOnError)
+	dir := fs.String("dir", "", "语义作者入口目录（services/ + metrics.yaml + concepts.yaml）")
+	dbPath := fs.String("db", "", "SQLite 运行时存储路径（缺省取 DGW_DB_PATH）")
+	dryRun := fs.Bool("dry-run", false, "只计算 dry-run diff，不写库")
+	fs.Parse(os.Args[2:])
+
+	if *dir == "" {
+		log.Fatal("semantic-sync 需要 --dir（语义作者入口目录）")
+	}
+	st := openStore(*dbPath)
+	defer st.Close()
+	ctx := context.Background()
+
+	var res *semantic.Result
+	var err error
+	if *dryRun {
+		res, err = semantic.DryRun(ctx, st, *dir)
+	} else {
+		res, err = semantic.Sync(ctx, st, *dir)
+	}
+	if err != nil {
+		log.Fatalf("语义同步管线失败（未写库，原子拒绝）: %v", err)
+	}
+
+	printDiff(res.Diff)
+	if *dryRun {
+		fmt.Printf("dgw: dry-run 完成（未写库）；变更 %d 项\n", res.Diff.Count())
+		return
+	}
+
+	// 应用后的通配覆盖告警：新表不在通配快照 = 默认拒绝，提示重展开。
+	warnPatternCoverage(ctx, st)
+
+	// embedding：失败降级不阻塞（验收标准）。
+	if key := os.Getenv(config.EnvOpenAIKey); key != "" {
+		emb := semantic.NewOpenAIEmbedder(key, "")
+		n, embErr := semantic.EmbedEntityTexts(ctx, st, mustSnapshot(ctx, st), emb, "text-embedding-3",
+			func(format string, args ...any) { log.Printf(format, args...) })
+		if embErr != nil {
+			log.Printf("embedding 降级提示: %v", embErr)
+		}
+		if n > 0 {
+			log.Printf("已生成 %d 个实体向量（text-embedding-3）", n)
+		}
+	}
+	fmt.Printf("dgw: 语义同步完成（实体 upsert %d / 墓碑 %d，边 %d/%d，枚举 %d/%d）\n",
+		res.Stats.EntitiesUpserted, res.Stats.EntitiesTombstoned,
+		res.Stats.RelationsUpserted, res.Stats.RelationsTombstoned,
+		res.Stats.EnumsUpserted, res.Stats.EnumsTombstoned)
+}
+
+// mustSnapshot 取当前语义快照（embedding 的实体面；Sync 后即最新状态）。
+func mustSnapshot(ctx context.Context, st *store.Store) *semantic.Target {
+	t, err := semantic.Snapshot(ctx, st)
+	if err != nil {
+		log.Fatalf("读取语义快照失败: %v", err)
+	}
+	return t
+}
+
+// printDiff 打印 dry-run diff（CLI 展示：增删改清单）。
+func printDiff(d *semantic.Diff) {
+	for _, e := range d.EntitiesAdded {
+		fmt.Printf("  + 实体 %s (%s) %s\n", e.FQN, e.Kind, e.Description)
+	}
+	for _, e := range d.EntitiesUpdated {
+		fmt.Printf("  ~ 实体 %s (%s)\n", e.FQN, e.Kind)
+	}
+	for _, e := range d.EntitiesDeleted {
+		fmt.Printf("  - 实体 %s (%s)（墓碑）\n", e.FQN, e.Kind)
+	}
+	for _, r := range d.RelationsAdded {
+		fmt.Printf("  + 边 %s %s → %s\n", r.Type, r.SrcFQN, r.DstFQN)
+	}
+	for _, r := range d.RelationsDeleted {
+		fmt.Printf("  - 边 %s %s → %s（墓碑）\n", r.Type, r.SrcFQN, r.DstFQN)
+	}
+	for _, v := range d.EnumsAdded {
+		fmt.Printf("  + 枚举 %s = %s\n", v.ColumnFQN, v.Value)
+	}
+	for _, v := range d.EnumsDeleted {
+		fmt.Printf("  - 枚举 %s = %s（墓碑）\n", v.ColumnFQN, v.Value)
+	}
+}
+
+// warnPatternCoverage 检查通配授权快照是否覆盖当前全部表：未覆盖的表 =
+// 新表默认拒绝，提示重跑 grants-apply 重展开（ADR-0004「新表默认拒绝 +
+// 管线告警 + 重展开确认」）。
+func warnPatternCoverage(ctx context.Context, st *store.Store) {
+	patterns, err := grants.SyncPatterns(ctx, st)
+	if err != nil {
+		log.Printf("读取通配声明失败（跳过覆盖检查）: %v", err)
+		return
+	}
+	if len(patterns) == 0 {
+		return
+	}
+	tables, err := semantic.ListTables(ctx, st)
+	if err != nil {
+		log.Printf("读取表清单失败（跳过覆盖检查）: %v", err)
+		return
+	}
+	covered := map[string]bool{}
+	grantsList, err := grants.Snapshot(ctx, st)
+	if err != nil {
+		log.Printf("读取授权快照失败（跳过覆盖检查）: %v", err)
+		return
+	}
+	for _, g := range grantsList {
+		covered[g.TableFQN] = true
+	}
+	// 通配声明的展开面：授权快照里任意用户覆盖即视为已展开（告警面向
+	// 「表不在任何快照里」，不是逐用户）。
+	uncovered := 0
+	for _, t := range tables {
+		if !covered[t.FQN] {
+			uncovered++
+		}
+	}
+	if uncovered > 0 {
+		log.Printf("管线告警：%d 张新表不在通配授权快照中（默认拒绝）；重跑 grants-apply 触发重展开确认", uncovered)
+	}
+}
+
+// cmdSemanticBackup 备份运行时存储：WAL checkpoint + 文件拷贝（ADR-0005）。
+func cmdSemanticBackup() {
+	fs := flag.NewFlagSet("semantic-backup", flag.ExitOnError)
+	out := fs.String("out", "", "备份目标文件路径")
+	dbPath := fs.String("db", "", "SQLite 运行时存储路径（缺省取 DGW_DB_PATH）")
+	fs.Parse(os.Args[2:])
+
+	if *out == "" {
+		log.Fatal("semantic-backup 需要 --out（备份目标文件路径）")
+	}
+	st := openStore(*dbPath)
+	defer st.Close()
+
+	if err := semantic.Backup(context.Background(), st, *out); err != nil {
+		log.Fatalf("备份失败: %v", err)
+	}
+	fmt.Printf("dgw: 已备份到 %s（WAL checkpoint + 文件拷贝，可直接用于回滚恢复）\n", *out)
 }

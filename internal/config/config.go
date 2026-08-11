@@ -15,6 +15,7 @@ const (
 	EnvPGDatabases = "DGW_PG_DATABASES"            // execute_sql 路由表（JSON 数组 [{dbname, service, dsn}]，DSN 即凭证）
 	EnvSQLLimit    = "DGW_SQL_LIMIT"               // 行数上限（默认 500，范围 500-5000，越界启动失败）
 	EnvPGTimeoutMS = "DGW_PG_STATEMENT_TIMEOUT_MS" // statement_timeout 毫秒（默认 30000）
+	EnvOpenAIKey   = "DGW_OPENAI_API_KEY"          // semantic-sync 的 embedding 生成（text-embedding-3；缺省跳过，失败降级不阻塞）
 )
 
 // Config 是一次进程启动的配置快照。

@@ -6,8 +6,14 @@
 // 重载轮询据此感知（02 票）。凭据（key）不属本包：明文仅创建时打印一次，
 // 永不进 YAML，key 生命周期在 credentials 包。
 //
-// v1 只支持显式表 FQN（服务.库.表）；服务/库级通配是作者入口语法糖，编译期
-// 展开依赖语义层表清单（07 同步管线），语义层落地前通配一律编译拒绝。
+// 授权对象（07 票扩展，ADR-0004「指标/概念授权编译期展开为表授权」）：
+//   - 表 FQN（服务.库.表）→ 直接写入 dgw_table_grants；
+//   - metric:xxx / concept:xxx → 经 Expander 展开为底层表清单写入；
+//   - service:xxx / database:xxx.yyy → 通配语法糖，展开为当前表清单快照
+//     写入，并把声明记入 dgw_grant_patterns——同步管线据此告警「新表
+//     未覆盖」（新表默认拒绝，重展开 = 重跑 grants-apply）。`*` 不开放。
+//
+// 展开失败（指标/概念不存在、通配展开出空清单）= 编译拒绝（杜绝悬空授权）。
 package grants
 
 import (
@@ -23,14 +29,71 @@ import (
 // FQNSegments 是表 FQN 的段数：服务.库.表（与本体 Table 实体同一命名空间）。
 const FQNSegments = 3
 
-// ErrWildcard 表示 FQN 含通配模式——v1 不开放，展开归 07。
-var ErrWildcard = errors.New("wildcard FQN not supported in v1")
+// ErrWildcard 表示授权对象含未支持的 `*` 通配——全库通配不开放（ADR-0004：
+// 「全授权」应是显式写出的少数情况；服务/库级通配走 service:/database: 语法）。
+var ErrWildcard = errors.New("wildcard `*` not supported: use service:/database: targets")
+
+// Target 前缀（授权对象形态，07 票）。
+const (
+	PrefixMetric   = "metric:"
+	PrefixConcept  = "concept:"
+	PrefixService  = "service:"
+	PrefixDatabase = "database:"
+)
+
+// Expander 是把授权对象展开为具体表 FQN 清单的注入接口（由 semantic 包实现，
+// 07 票同步管线落地后接线）：grants 保持授权写入域，不依赖语义查询实现。
+type Expander interface {
+	// Expand 返回授权对象的展开表清单（按 FQN 排序、去重）。
+	// 对象不存在或展开为空 → 返回错误（编译拒绝，杜绝悬空授权）。
+	Expand(ctx context.Context, target string) ([]string, error)
+}
+
+// ValidateGrantTarget 校验授权对象：表 FQN（服务.库.表）或带前缀形态
+// （metric:/concept:/service:/database:）。`*` 一律拒绝。
+func ValidateGrantTarget(target string) error {
+	if strings.ContainsAny(target, "*") {
+		return fmt.Errorf("%w（授权对象 %q 含 *；服务/库级通配请写 service:服务名 或 database:服务.库）", ErrWildcard, target)
+	}
+	switch {
+	case strings.HasPrefix(target, PrefixMetric):
+		return validateName(target, PrefixMetric, "指标")
+	case strings.HasPrefix(target, PrefixConcept):
+		return validateName(target, PrefixConcept, "概念")
+	case strings.HasPrefix(target, PrefixService):
+		return validateName(target, PrefixService, "服务")
+	case strings.HasPrefix(target, PrefixDatabase):
+		return validateDB(target)
+	default:
+		return ValidateFQN(target)
+	}
+}
+
+func validateName(target, prefix, what string) error {
+	name := strings.TrimPrefix(target, prefix)
+	if name == "" {
+		return fmt.Errorf("%s授权对象 %q 缺名字（%s名字）", what, target, what)
+	}
+	if strings.ContainsAny(name, ". \t\r\n") {
+		return fmt.Errorf("%s授权对象 %q 名字不能含点或空白", what, target)
+	}
+	return nil
+}
+
+func validateDB(target string) error {
+	name := strings.TrimPrefix(target, PrefixDatabase)
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("库级通配 %q 应为 服务.库 两段", target)
+	}
+	return nil
+}
 
 // ValidateFQN 校验授权挂载点：恰好 服务.库.表 三段、每段非空。
 // 返回的错误信息面向 CLI 运维者，可直接展示。
 func ValidateFQN(fqn string) error {
 	if strings.ContainsAny(fqn, "*") {
-		return fmt.Errorf("%w: %q（服务/库级通配是作者入口语法糖，编译期展开依赖语义层表清单（07 票），v1 请写具体表 FQN）", ErrWildcard, fqn)
+		return fmt.Errorf("%w: %q（全库通配不开放；服务/库级通配请写 service:/database: 目标）", ErrWildcard, fqn)
 	}
 	parts := strings.Split(fqn, ".")
 	if len(parts) != FQNSegments {
