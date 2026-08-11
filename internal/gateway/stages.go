@@ -42,10 +42,12 @@ func stageTimerFrom(ctx context.Context) *stageTimer {
 	return &stageTimer{stages: map[string]time.Duration{}}
 }
 
-// newStageTimer 取调用上下文的耗时累积器并注入 HTTP 形态的认证耗时：
-// verifyToken 把 VerifyKey 实测耗时写进 TokenInfo.Extra["auth_ms"]（SDK
-// 中间件把同一 TokenInfo 挂进调用上下文，handler 侧可读——与 key_id 同一
-// 机制）。stdio 形态无 per-call 认证，该阶段不打点（如实缺失）。
+// newStageTimer 取调用上下文的耗时累积器并注入认证阶段耗时：verifyToken
+// 把 VerifyKey 实测耗时写进 TokenInfo.Extra["auth_ms"]。注意：SDK 的会话
+// 上下文在连接建立时派生（jsonrpc2 reqCtx = WithCancel(连接 ctx)），handler
+// 读到的 TokenInfo 是会话建立那次请求的——auth 阶段 = 会话建立时实测
+// （每次 HTTP 请求的重新校验只用于 401/会话防劫持，不重复计入记录）。
+// stdio 形态无 per-call 认证，该阶段不打点（如实缺失）。
 func newStageTimer(ctx context.Context) *stageTimer {
 	t := stageTimerFrom(ctx)
 	if ti := auth.TokenInfoFromContext(ctx); ti != nil {

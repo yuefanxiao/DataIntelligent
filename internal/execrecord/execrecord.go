@@ -137,7 +137,7 @@ func New(cfg Config) (*Logger, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("建执行记录目录 %s: %w", cfg.Dir, err)
 	}
 	l := &Logger{
@@ -233,6 +233,10 @@ func (l *Logger) rollover(day string) error {
 	if l.day != "" {
 		if l.rawFile != nil {
 			if err := l.rawFile.Close(); err != nil {
+				// 关闭失败也置 nil（已关句柄二次 Close 恒失败——不置 nil 会
+				// 让每次写入都在同一处失败，记录器哑死）；错误如实上报，
+				// 下次写入跳过关闭重试摘要。
+				l.rawFile = nil
 				return fmt.Errorf("关闭 %s: %w", rawName(l.day), err)
 			}
 			l.rawFile = nil
@@ -242,7 +246,7 @@ func (l *Logger) rollover(day string) error {
 		}
 		l.day = ""
 	}
-	f, err := os.OpenFile(filepath.Join(l.dir, rawName(day)), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(l.dir, rawName(day)), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("打开 %s: %w", rawName(day), err)
 	}
@@ -253,7 +257,8 @@ func (l *Logger) rollover(day string) error {
 
 // prune 按保留期清理过期文件：原始文件过期先补摘要再删除（网关跨日停机时
 // 前一日摘要可能未生成）；摘要按保留期直接删除。日期比较用 "2006-01-02"
-// 字符串序（零填充，字典序即时间序）。
+// 字符串序（零填充，字典序即时间序）。删除条件 date <= cutoff：保留恰好
+// N 天（今日-N+1 … 今日），与 spec §4.9「原始 7 天 / 摘要 30 天」一致。
 func (l *Logger) prune() error {
 	rawCutoff := dayOf(l.now().AddDate(0, 0, -l.rawRetention))
 	sumCutoff := dayOf(l.now().AddDate(0, 0, -l.summaryRetention))
@@ -271,7 +276,7 @@ func (l *Logger) prune() error {
 		}
 		switch kind {
 		case "raw-":
-			if date < rawCutoff {
+			if date <= rawCutoff {
 				if err := l.summarize(date); err != nil {
 					return err // 先补摘要再删（聚合信号不丢）
 				}
@@ -280,7 +285,7 @@ func (l *Logger) prune() error {
 				}
 			}
 		case "summary-":
-			if date < sumCutoff {
+			if date <= sumCutoff {
 				if err := os.Remove(filepath.Join(l.dir, e.Name())); err != nil {
 					return fmt.Errorf("清理摘要文件 %s: %w", e.Name(), err)
 				}
@@ -299,29 +304,69 @@ func (l *Logger) prune() error {
 //	         unauthorized）
 //	keywords search_entities 关键词分布（去重计数）
 //
+// 幂等键 = 「摘要已存在且其 raw_size 与当前原始文件大小一致」：乱序追加
+// （跨零点调用晚到）与崩溃残留（半截/0 字节摘要）都会导致不一致 → 重算，
+// 摘要永不为陈旧数据所固化。写入 = 唯一临时文件 + rename（同目录原子，
+// 崩溃/跨进程并发（守护进程与 CLI 共享 /logs）都不留撕裂摘要）。
 // 坏行跳过（尽力而为的信号源，不因单行损坏丢弃整日聚合）。
 func (l *Logger) summarize(date string) error {
-	sumPath := filepath.Join(l.dir, summaryName(date))
-	if _, err := os.Stat(sumPath); err == nil {
-		return nil // 幂等：已聚合
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("检查摘要 %s: %w", sumPath, err)
+	rawPath := filepath.Join(l.dir, rawName(date))
+	rawSize, err := fileSize(rawPath)
+	if err != nil {
+		return err
 	}
-	agg, err := aggregateFile(filepath.Join(l.dir, rawName(date)))
+	sumPath := filepath.Join(l.dir, summaryName(date))
+	if b, err := os.ReadFile(sumPath); err == nil {
+		var existing struct {
+			RawSize int64 `json:"raw_size"`
+		}
+		if json.Unmarshal(b, &existing) == nil && existing.RawSize == rawSize {
+			return nil // 幂等：原始文件自上次聚合以来无变化
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读摘要 %s: %w", sumPath, err)
+	}
+	agg, err := aggregateFile(rawPath)
 	if err != nil {
 		return err
 	}
 	if agg.Date == "" {
 		return nil // 空文件（无有效记录）：不生成摘要（预开文件/坏行场景）
 	}
+	agg.RawSize = rawSize
 	line, err := json.Marshal(agg)
 	if err != nil {
 		return fmt.Errorf("摘要序列化失败: %w", err)
 	}
-	if err := os.WriteFile(sumPath, append(line, '\n'), 0o644); err != nil {
-		return fmt.Errorf("写摘要 %s: %w", sumPath, err)
+	// 原子写：同目录唯一临时文件 + rename（os.WriteFile 直写目标路径会在
+	// 崩溃/并发下留下撕裂摘要，且被幂等键误判为「已聚合」）。
+	tmp, err := os.CreateTemp(l.dir, "summary-"+date+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("建摘要临时文件: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // 失败路径清理（成功 rename 后文件已不存在）
+	if _, err := tmp.Write(append(line, '\n')); err != nil {
+		tmp.Close()
+		return fmt.Errorf("写摘要临时文件: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关摘要临时文件: %w", err)
+	}
+	if err := os.Rename(tmpName, sumPath); err != nil {
+		return fmt.Errorf("落摘要 %s: %w", sumPath, err)
 	}
 	return nil
+}
+
+// fileSize 返回文件字节数（保留期/幂等判断用；文件缺失 = 错误——摘要的
+// 输入不存在时调用方应能感知，而非静默跳过）。
+func fileSize(path string) (int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("stat %s: %w", path, err)
+	}
+	return fi.Size(), nil
 }
 
 // ── 聚合 ─────────────────────────────────────────────────────────────────
@@ -346,6 +391,7 @@ type keywordCount struct {
 // dailySummary 是某日的聚合摘要（summary-YYYY-MM-DD.jsonl 一行）。
 type dailySummary struct {
 	Date     string               `json:"date"`
+	RawSize  int64                `json:"raw_size"` // 聚合时的原始文件字节数（幂等键：变化即重算）
 	Calls    map[string]toolStats `json:"calls"`
 	Rejects  map[string]int       `json:"rejects"`
 	Keywords []keywordCount       `json:"keywords,omitempty"`
@@ -367,6 +413,9 @@ func aggregateFile(path string) (*dailySummary, error) {
 	kwCount := map[string]int{}
 
 	sc := bufio.NewScanner(f)
+	// 行可远超默认 64KB（execute_sql 的 SQL 原文无长度上限）——Scanner 默认
+	// 上限会让超长行永久中断聚合（记录器哑死），放宽到 16MB。
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {

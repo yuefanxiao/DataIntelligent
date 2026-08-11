@@ -303,6 +303,118 @@ func TestSummarizeIdempotent(t *testing.T) {
 	}
 }
 
+// 对抗评审收敛（P1）：跨零点乱序写入（零点前发起的调用晚到）不得让当日
+// 摘要提前固化——摘要按 raw_size 变化重算，晚到记录最终进聚合。
+func TestSummaryRecomputesOnOutOfOrderAppend(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 59, 55, 0, time.Local) // 零点前发起
+	d2 := time.Date(2026, 8, 12, 0, 0, 5, 0, time.Local)    // 零点后
+
+	// 顺序写入 d2 → 反向回写 d1（跨零点调用晚到）→ 再写两条 d2
+	recs := []ToolCall{
+		{TS: d2, Tool: "execute_sql", Status: StatusSuccess},
+		{TS: d1, Tool: "execute_sql", Status: StatusSuccess},
+		{TS: d2.Add(time.Minute), Tool: "execute_sql", Status: StatusSuccess},
+		{TS: d2.Add(2 * time.Minute), Tool: "execute_sql", Status: StatusSuccess},
+	}
+	for _, r := range recs {
+		if err := l.LogToolCall(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 次日首写触发维护：d1/d2 摘要都应按最终 raw 内容聚合（含晚到记录）
+	if err := l.LogToolCall(ToolCall{TS: d2.Add(24 * time.Hour), Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	sum2 := parseLine(t, readLines(t, filepath.Join(dir, "summary-2026-08-12.jsonl"))[0])
+	calls := sum2["calls"].(map[string]any)["execute_sql"].(map[string]any)
+	if calls["calls"] != float64(3) {
+		t.Errorf("d2 聚合 calls = %v，期望 3（晚到/追加记录不丢）", calls["calls"])
+	}
+	sum1 := parseLine(t, readLines(t, filepath.Join(dir, "summary-2026-08-11.jsonl"))[0])
+	calls1 := sum1["calls"].(map[string]any)["execute_sql"].(map[string]any)
+	if calls1["calls"] != float64(1) {
+		t.Errorf("d1 聚合 calls = %v，期望 1", calls1["calls"])
+	}
+}
+
+// 对抗评审收敛（P1）：超长记录行（>64KB Scanner 默认上限，如超长 SQL 原文）
+// 不得让聚合永久失败——16MB 行上限下照常聚合。
+func TestAggregateOversizedLine(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	bigSQL := strings.Repeat("SELECT ", 20*1024) // ~140KB 行
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess,
+		Params: map[string]any{"sql": bigSQL}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err) // 跨日轮转要聚合超长行——不得失败
+	}
+	sum := parseLine(t, readLines(t, filepath.Join(dir, "summary-2026-08-11.jsonl"))[0])
+	calls := sum["calls"].(map[string]any)["execute_sql"].(map[string]any)
+	if calls["calls"] != float64(1) {
+		t.Errorf("超长行聚合 calls = %v，期望 1", calls["calls"])
+	}
+}
+
+// 对抗评审收敛（P2）：摘要撕裂/0 字节残留（崩溃窗口）不得被幂等键误判——
+// raw_size 不匹配即重算。
+func TestSummaryRecoversFromTornFile(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	d1 := time.Date(2026, 8, 11, 23, 0, 0, 0, time.Local)
+	d2 := time.Date(2026, 8, 12, 1, 0, 0, 0, time.Local)
+	if err := l.LogToolCall(ToolCall{TS: d1, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟崩溃残留：0 字节摘要文件（WriteFile 截断后进程崩溃窗口）
+	sumPath := filepath.Join(dir, "summary-2026-08-11.jsonl")
+	if err := os.WriteFile(sumPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: d2, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	// 0 字节摘要被重算覆盖（而非永久跳过）
+	sum := parseLine(t, readLines(t, filepath.Join(dir, "summary-2026-08-11.jsonl"))[0])
+	if sum["date"] != "2026-08-11" {
+		t.Errorf("撕裂摘要未重算: %v", sum)
+	}
+	calls := sum["calls"].(map[string]any)["execute_sql"].(map[string]any)
+	if calls["calls"] != float64(1) {
+		t.Errorf("重算 calls = %v，期望 1", calls["calls"])
+	}
+}
+
+// 保留期精确性（对抗评审收敛 P3）：7 天配置恰好保留 7 个原始文件（不含
+// 今日-N），摘要 30 天同理——date <= cutoff 删除。
+func TestRetentionExactDays(t *testing.T) {
+	dir := t.TempDir()
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	// 写 7 天前的记录（应被删）+ 6 天前（应保留）
+	old := time.Date(2026, 8, 5, 12, 0, 0, 0, time.Local)  // today-7
+	keep := time.Date(2026, 8, 6, 12, 0, 0, 0, time.Local) // today-6
+	if err := l.LogToolCall(ToolCall{TS: old, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: keep, Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LogToolCall(ToolCall{TS: testNow(), Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "raw-2026-08-05.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("today-7 原始文件应被清理（恰好 7 天保留）")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "raw-2026-08-06.jsonl")); err != nil {
+		t.Errorf("today-6 原始文件应保留: %v", err)
+	}
+}
+
 // 自愈：聚合摘要失败（如原始文件临时不可读）后记录器不哑死——l.day 保持
 // 前一日，下次写入重试摘要（幂等），成功才推进到新日文件。
 func TestRolloverSelfHeal(t *testing.T) {
@@ -519,6 +631,30 @@ func TestWriteAfterClose(t *testing.T) {
 	}
 	if err := l.LogToolCall(ToolCall{TS: time.Now(), Tool: "x"}); err == nil {
 		t.Error("关闭后写入应报错")
+	}
+}
+
+// 文件权限（对抗评审收敛 P2）：SQL 原文落盘的世界可读性由代码闭合——
+// 目录 0700 / 文件 0600（宿主机权限即访问边界，ADR-0006 不依赖部署 umask）。
+func TestFilePermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	l := newTestLogger(t, dir, 7, 30, testNow)
+	if err := l.LogToolCall(ToolCall{TS: testNow(), Tool: "execute_sql", Status: StatusSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf("日志目录权限 = %o，期望 0700", perm)
+	}
+	fi, err := os.Stat(filepath.Join(dir, rawName(dayOf(testNow()))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("原始文件权限 = %o，期望 0600", perm)
 	}
 }
 

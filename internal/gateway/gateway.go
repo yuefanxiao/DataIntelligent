@@ -93,7 +93,11 @@ func WithExecLog(l *execrecord.Logger) Option {
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
 // 限额越界 / 并发闸数值非法 = 启动失败（配置错误 fail fast）。
+// logger 为 nil 时退回 slog.Default()（执行记录写入失败等兜底输出不能 panic）。
 func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
 		Version: implVersion,

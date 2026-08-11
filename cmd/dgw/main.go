@@ -163,8 +163,9 @@ func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 
 // execLog 打开执行记录写入器（06 票；spec §4.9 参数表：原始 7 天轮转 +
 // 聚合摘要 30 天，env 可覆盖；ADR-0009 部署 volume /logs）。目录不可建/
-// 保留期非法 = 启动失败（配置错误 fail fast）——serve 形态专用：守护进程
-// 的记录设施必须可用；一次性 CLI 命令（key-create/revoke）用 openExecLog
+// 保留期非法 = 启动失败（配置错误 fail fast）——serve / serve-stdio 形态
+// 共用：六工具全记是网关契约（spec §4.6），记录设施不可用 = 带病服务，
+// 启动期尽早暴露；一次性 CLI 命令（key-create/revoke）用 openExecLog
 // 降级（记录失败不影响命令结果，ADR-0006「故障响应不依赖任何审计设施」）。
 func execLog(cfg config.Config) *execrecord.Logger {
 	l, err := openExecLog(cfg)
