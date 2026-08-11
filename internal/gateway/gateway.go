@@ -17,6 +17,7 @@ import (
 	"github.com/yuefanxiao/DataIntelligent/internal/authz"
 	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
@@ -36,8 +37,10 @@ type Gateway struct {
 	store    *store.Store
 	authz    *authz.Service
 	server   *mcp.Server
-	execSQL  *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
-	loadGate *loadgate.Gate  // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
+	execSQL  *executeSQLDeps    // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	loadGate *loadgate.Gate     // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
+	execlog  *execrecord.Logger // 执行记录（06 票；nil = 不记录）
+	logger   *slog.Logger       // 网关日志（执行记录写入失败等兜底输出）
 }
 
 // Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04/05 票接线）。
@@ -45,6 +48,7 @@ type Option func(*options)
 
 type options struct {
 	execSQL *executeSQLDeps
+	execlog *execrecord.Logger
 	// 并发闸原始数值（WithLoadGate 注入；New 统一校验——与 WithExecuteSQL
 	// 的限额校验同一惯例；gateSet=false 取 spec 默认 2/8）。
 	gateSet               bool
@@ -80,10 +84,20 @@ func WithLoadGate(perKey, total int) Option {
 	}
 }
 
+// WithExecLog 注入执行记录写入器（06 票；spec §4.6 六工具全记 + 认证失败 +
+// key 生命周期）。nil = 不记录（测试便捷；生产 main 恒注入）。
+func WithExecLog(l *execrecord.Logger) Option {
+	return func(o *options) { o.execlog = l }
+}
+
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
 // 限额越界 / 并发闸数值非法 = 启动失败（配置错误 fail fast）。
+// logger 为 nil 时退回 slog.Default()（执行记录写入失败等兜底输出不能 panic）。
 func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
 		Version: implVersion,
@@ -93,11 +107,12 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 		Logger: logger,
 	})
 
-	g := &Gateway{store: st, server: server, authz: authz.New(st, logger)}
+	g := &Gateway{store: st, server: server, authz: authz.New(st, logger), logger: logger}
 	var o options
 	for _, opt := range opts {
 		opt(&o)
 	}
+	g.execlog = o.execlog
 	// 并发闸恒启用（负载防护不缺席）：数值在此统一校验（option 只存数据，
 	// New 校验上报——与 WithExecuteSQL 限额同一惯例）；未注入取 spec 默认。
 	perKey, total := config.DefaultKeyConcurrency, config.DefaultProcessConcurrency

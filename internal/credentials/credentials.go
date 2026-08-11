@@ -42,19 +42,25 @@ func Hash(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Create 生成一把新 key，只把哈希写入 dgw_credentials 表，返回明文。
-// 调用方（CLI）负责「明文仅打印一次」：除本返回值外明文不出现在任何存储。
-func Create(ctx context.Context, db *sql.DB, userID string) (string, error) {
+// Create 生成一把新 key，只把哈希写入 dgw_credentials 表，返回明文与行 ID
+// （行 ID = 快照寻址/吊销句柄/执行记录 key 生命周期记录的标识）。调用方
+// （CLI）负责「明文仅打印一次」：除本返回值外明文不出现在任何存储。
+func Create(ctx context.Context, db *sql.DB, userID string) (string, int64, error) {
 	plain, err := Generate()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if _, err := db.ExecContext(ctx,
+	res, err := db.ExecContext(ctx,
 		"INSERT INTO dgw_credentials (key_hash, user_id) VALUES (?, ?)",
-		Hash(plain), userID); err != nil {
-		return "", fmt.Errorf("store key hash: %w", err)
+		Hash(plain), userID)
+	if err != nil {
+		return "", 0, fmt.Errorf("store key hash: %w", err)
 	}
-	return plain, nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return "", 0, fmt.Errorf("key 行 ID: %w", err)
+	}
+	return plain, id, nil
 }
 
 // VerifyKey 校验明文凭据：哈希比对命中且未吊销则返回该 key 的记录
@@ -84,6 +90,26 @@ type KeyInfo struct {
 	UserID    string
 	CreatedAt string
 	RevokedAt string // 空串 = 有效
+}
+
+// Get 按行 ID 取一把 key 的快照（吊销命令寻址/生命周期记录的属主查询；
+// 不存在返回 false）。
+func Get(ctx context.Context, db *sql.DB, id int64) (KeyInfo, bool, error) {
+	var k KeyInfo
+	var revokedAt sql.NullString
+	err := db.QueryRowContext(ctx,
+		"SELECT id, user_id, created_at, revoked_at FROM dgw_credentials WHERE id = ?",
+		id).Scan(&k.ID, &k.UserID, &k.CreatedAt, &revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return KeyInfo{}, false, nil
+	}
+	if err != nil {
+		return KeyInfo{}, false, fmt.Errorf("lookup key %d: %w", id, err)
+	}
+	if revokedAt.Valid {
+		k.RevokedAt = revokedAt.String
+	}
+	return k, true, nil
 }
 
 // List 返回全部 key 的快照（按创建时间升序），供授权快照/吊销寻址。

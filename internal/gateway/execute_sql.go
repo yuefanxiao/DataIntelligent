@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/yuefanxiao/DataIntelligent/internal/execrecord"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 	"github.com/yuefanxiao/DataIntelligent/internal/validate"
 )
@@ -71,6 +72,10 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 	defer g.loadGate.Release(keyID)
 
 	start := time.Now()
+	// 分阶段耗时（06 票执行记录）：认证阶段由 logged 包装器从 TokenInfo
+	// 注入；本函数打 权限（allow 回调）/解析（Parse+Check 总耗时减权限）/
+	// 执行（查询+编码）。stageTimerFrom 在 logged 注入的 ctx 上恒有值。
+	timer := stageTimerFrom(ctx)
 
 	// ── 段 0：dbname 路由（目标库 + 服务归属）──────────────────────────────
 	dbname := in.DBName
@@ -105,34 +110,50 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 		return []string{service + "." + dbname + "." + ref.Table}
 	}
 	allow := func(fqn string) bool {
-		return g.AuthorizeBusinessTable(ctx, fqn) == nil
+		permStart := time.Now()
+		ok := g.AuthorizeBusinessTable(ctx, fqn) == nil
+		timer.Add(execrecord.StagePerm, time.Since(permStart))
+		return ok
 	}
 	// 语句计数先于 Check（Check 内部会再解析一次——WASM 解析毫秒级，可接受）：
 	// 0 条 = 纯注释等无可执行内容；>1 条 = 批处理（pgx 单语句协议 + 包层括号
 	// 内不允许语句分隔，v1 无批处理语义）——都显式结构化拒绝，避免误导性 42601。
+	// 解析阶段打点统一收敛：= 链总耗时减权限比对（Check 内部：解析→分类→
+	// 提取→逐表比对，唯一的外部回调是 allow——perm 已单独打点，不重叠）。
+	parseStart := time.Now()
+	addParse := func() {
+		timer.Add(execrecord.StageParse, time.Since(parseStart)-timer.Get(execrecord.StagePerm))
+	}
 	stmts, perr := validate.Parse(in.SQL)
 	if perr != nil {
+		addParse()
 		return errResult(perr), nil, nil
 	}
 	if len(stmts) == 0 {
+		addParse()
 		return errResult(gwerr.InvalidRequest(
 			"SQL 不含可执行语句（仅注释/空白）",
 			map[string]any{"reason": "empty"},
 		)), nil, nil
 	}
 	if len(stmts) > 1 {
+		addParse()
 		return errResult(gwerr.InvalidRequest(
 			"多条语句不被支持（execute_sql 一次执行一条只读查询）",
 			map[string]any{"reason": "multi_statement"},
 		)), nil, nil
 	}
 	if _, verr := validate.Check(in.SQL, resolve, allow); verr != nil {
+		addParse()
 		return errResult(verr), nil, nil
 	}
+	addParse()
 
 	// ── 段 3+4：限额包层执行 + 结果编码 ───────────────────────────────────
+	execStart := time.Now()
 	rows, err := pool.Query(ctx, wrapLimit(in.SQL, g.execSQL.limit))
 	if err != nil {
+		timer.Add(execrecord.StageExec, time.Since(execStart))
 		return errResult(pgError(err)), nil, nil
 	}
 	defer rows.Close()
@@ -141,8 +162,10 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 	if err != nil {
 		// 执行期错误可能在结果迭代阶段才浮现（如 statement_timeout 57014
 		// 经 rows.Err() 返回）——同样按 pgError 分类，不吞成 internal。
+		timer.Add(execrecord.StageExec, time.Since(execStart))
 		return errResult(pgError(err)), nil, nil
 	}
+	timer.Add(execrecord.StageExec, time.Since(execStart))
 	return nil, res, nil
 }
 

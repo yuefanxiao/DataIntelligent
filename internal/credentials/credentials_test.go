@@ -58,7 +58,7 @@ func TestPlaintextNeverStored(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	plain, err := Create(ctx, s.DB(), "dev-alice")
+	plain, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestCreateVerifyRoundtrip(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	plain, err := Create(ctx, s.DB(), "dev-alice")
+	plain, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -120,11 +120,11 @@ func TestMultipleKeysSameUser(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	k1, err := Create(ctx, s.DB(), "dev-alice")
+	k1, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	k2, err := Create(ctx, s.DB(), "dev-alice")
+	k2, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestVerifyAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	plain, err := Create(ctx, s1.DB(), "dev-bob")
+	plain, _, err := Create(ctx, s1.DB(), "dev-bob")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestRevokeImmediateAndIdempotent(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	plain, err := Create(ctx, s.DB(), "dev-alice")
+	plain, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestRevokePersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	plain, err := Create(ctx, s1.DB(), "dev-bob")
+	plain, _, err := Create(ctx, s1.DB(), "dev-bob")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestListNeverExposesPlaintext(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	plain, err := Create(ctx, s.DB(), "dev-alice")
+	plain, _, err := Create(ctx, s.DB(), "dev-alice")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
