@@ -289,18 +289,28 @@ func (l *Logger) prune() error {
 				if err := l.summarize(date); err != nil {
 					return err // 先补摘要再删（聚合信号不丢）
 				}
-				if err := os.Remove(filepath.Join(l.dir, e.Name())); err != nil {
+				if err := removeIfExists(filepath.Join(l.dir, e.Name())); err != nil {
 					return fmt.Errorf("清理原始文件 %s: %w", e.Name(), err)
 				}
 			}
 		case "summary-":
 			if date <= sumCutoff {
-				if err := os.Remove(filepath.Join(l.dir, e.Name())); err != nil {
+				if err := removeIfExists(filepath.Join(l.dir, e.Name())); err != nil {
 					return fmt.Errorf("清理摘要文件 %s: %w", e.Name(), err)
 				}
 			}
 		}
 	}
+	return nil
+}
+
+// removeIfExists 删除文件；目标已不存在（外部清理竞态）视为成功。
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
 	return nil
 }
 
