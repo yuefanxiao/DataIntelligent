@@ -8,7 +8,7 @@
 //   - 语义元数据面（五个语义工具）= 认证即读，不查本包（由 gateway 的
 //     调用侧保证——授权入口只在业务面 handler 路径上）。
 //
-// 凭据校验不走本包：key 校验每次请求直接查 SQLite（credentials.Verify），
+// 凭据校验不走本包：key 校验每次请求直接查 SQLite（credentials.VerifyKey），
 // 吊销即时生效无需缓存；本包只缓存表授权快照。
 package authz
 

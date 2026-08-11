@@ -11,13 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/yuefanxiao/DataIntelligent/internal/credentials"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
@@ -470,22 +468,24 @@ func outcomeOf(res *mcp.CallToolResult, err error, elapsed time.Duration) callOu
 	if err != nil {
 		return callOutcome{e: &gwerr.Error{Kind: gwerr.KindInternal, Message: err.Error()}, elapsed: elapsed}
 	}
-	if res == nil || res.IsError {
-		if res != nil && len(res.Content) > 0 {
-			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
-				var e gwerr.Error
-				if json.Unmarshal([]byte(tc.Text), &e) == nil {
-					return callOutcome{e: &e, elapsed: elapsed}
-				}
+	// 成功路径优先（平铺，避免错误解析的深层嵌套）
+	if res != nil && !res.IsError {
+		var out sqlResult
+		if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+			_ = json.Unmarshal([]byte(tc.Text), &out)
+		}
+		return callOutcome{res: &out, elapsed: elapsed}
+	}
+	// 错误路径：content 应为 gwerr JSON
+	if res != nil && len(res.Content) > 0 {
+		if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+			var e gwerr.Error
+			if json.Unmarshal([]byte(tc.Text), &e) == nil {
+				return callOutcome{e: &e, elapsed: elapsed}
 			}
 		}
-		return callOutcome{e: &gwerr.Error{Kind: gwerr.KindInternal, Message: "error result"}, elapsed: elapsed}
 	}
-	var out sqlResult
-	if tc, ok := res.Content[0].(*mcp.TextContent); ok {
-		_ = json.Unmarshal([]byte(tc.Text), &out)
-	}
-	return callOutcome{res: &out, elapsed: elapsed}
+	return callOutcome{e: &gwerr.Error{Kind: gwerr.KindInternal, Message: "error result"}, elapsed: elapsed}
 }
 
 // assertFastReject 断言一次调用被并发闸快速拒绝（<1s 不排队）且 reason 正确。
@@ -528,19 +528,7 @@ func TestExecuteSQLE2EConcurrencyGate(t *testing.T) {
 		t.Fatalf("authz.Load: %v", err)
 	}
 	// keyA 的行 ID = 每 key 闸的粒度标识（details.key 应等于它）
-	var keyAID string
-	keys, err := credentials.List(context.Background(), st.DB())
-	if err != nil {
-		t.Fatalf("credentials.List: %v", err)
-	}
-	for _, k := range keys {
-		if k.UserID == "dev-alice" {
-			keyAID = strconv.FormatInt(k.ID, 10)
-		}
-	}
-	if keyAID == "" {
-		t.Fatal("找不到 dev-alice 的 key")
-	}
+	keyAID := keyIDForUser(t, st, "dev-alice")
 	ts := httptest.NewServer(g.HTTPHandler())
 	defer ts.Close()
 
@@ -553,15 +541,15 @@ func TestExecuteSQLE2EConcurrencyGate(t *testing.T) {
 	sb := connectHTTP(t, ts.URL, keyB)
 	defer sb.Close()
 
-	// 同 key 两个在途长查询（pg_sleep(3) 留足断言窗口）
+	// 同 key 两个在途长查询（pg_sleep(4) 留足断言窗口）
 	issued := make(chan struct{}, 2)
 	out := make(chan callOutcome, 2)
-	go holdCall(sa1, "SELECT pg_sleep(3)", issued, out)
-	go holdCall(sa2, "SELECT pg_sleep(3)", issued, out)
+	go holdCall(sa1, "SELECT pg_sleep(4)", issued, out)
+	go holdCall(sa2, "SELECT pg_sleep(4)", issued, out)
 	for i := 0; i < 2; i++ {
 		<-issued
 	}
-	time.Sleep(500 * time.Millisecond) // 等两个查询真正在途（闸位已占用）
+	time.Sleep(700 * time.Millisecond) // 等两个查询真正在途（闸位已占用）
 
 	// 第三发（同 key）→ 快速失败：rate_limited/key_concurrency_limit
 	e := assertFastReject(t, sa3, loadgate.ReasonKeyConcurrency)
@@ -622,12 +610,12 @@ func TestExecuteSQLE2EProcessGate(t *testing.T) {
 
 	issued := make(chan struct{}, 2)
 	out := make(chan callOutcome, 2)
-	go holdCall(sa, "SELECT pg_sleep(3)", issued, out)
-	go holdCall(sb, "SELECT pg_sleep(3)", issued, out)
+	go holdCall(sa, "SELECT pg_sleep(4)", issued, out)
+	go holdCall(sb, "SELECT pg_sleep(4)", issued, out)
 	for i := 0; i < 2; i++ {
 		<-issued
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 
 	// 第三 key（每 key 配额未满）→ 进程级闸拒绝，快速失败
 	e := assertFastReject(t, sc, loadgate.ReasonProcessConcurrency)

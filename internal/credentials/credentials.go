@@ -78,16 +78,6 @@ func VerifyKey(ctx context.Context, db *sql.DB, plaintext string) (KeyInfo, erro
 	return k, nil
 }
 
-// Verify 校验明文凭据：命中且未吊销则返回绑定用户；否则 ErrInvalidKey。
-// 只取用户身份的调用方用它；需要 key 粒度（并发闸）用 VerifyKey。
-func Verify(ctx context.Context, db *sql.DB, plaintext string) (string, error) {
-	k, err := VerifyKey(ctx, db, plaintext)
-	if err != nil {
-		return "", err
-	}
-	return k.UserID, nil
-}
-
 // KeyInfo 是快照视图里的一把 key（明文不存在，哈希即身份标识）。
 type KeyInfo struct {
 	ID        int64 // 行 ID：吊销命令的寻址句柄

@@ -45,8 +45,10 @@ type Option func(*options)
 
 type options struct {
 	execSQL *executeSQLDeps
-	load    *loadgate.Gate
-	loadErr error // WithLoadGate 数值非法时的配置错误（New 上报，fail fast）
+	// 并发闸原始数值（WithLoadGate 注入；New 统一校验——与 WithExecuteSQL
+	// 的限额校验同一惯例；gateSet=false 取 spec 默认 2/8）。
+	gateSet               bool
+	gatePerKey, gateTotal int
 }
 
 // executeSQLDeps 是 execute_sql 的运行时依赖：PG 路由 + 行数限额。
@@ -55,18 +57,9 @@ type executeSQLDeps struct {
 	limit  int
 }
 
-// 行数限额范围（spec §4.9 参数表：默认 500 / 硬上限 5000）。
-const (
-	sqlLimitDefault = 500
-	sqlLimitMax     = 5000
-)
-
-// 并发闸默认值（spec §4.9 参数表，config 包导出——单一事实源；env 可覆盖）。
-// 网关恒启用并发闸（负载防护不缺席），WithLoadGate 只调数值。
-const (
-	keyConcurrencyDefault     = config.DefaultKeyConcurrency
-	processConcurrencyDefault = config.DefaultProcessConcurrency
-)
+// 行数限额范围（spec §4.9 参数表：默认 500 / 硬上限 5000；下限即默认值，
+// 与 config 包同一事实源）。
+const sqlLimitMax = 5000
 
 // WithExecuteSQL 注入 execute_sql 的 PG 路由与行数限额（spec §4.9「env 可
 // 覆盖」：默认 500，硬上限 5000 不可配置超过）。未调用时 execute_sql 返回
@@ -77,23 +70,19 @@ func WithExecuteSQL(router *db.Router, limit int) Option {
 	}
 }
 
-// WithLoadGate 调并发闸数值（spec §4.9「env 可覆盖」：每 key 并发上限 /
-// 进程级总并发上限；默认 2/8）。非法值（<1 或进程级 < 每 key）= 启动失败
-// （配置错误 fail fast）。未调用时取 spec 默认 2/8。
+// WithLoadGate 注入并发闸数值（spec §4.9「env 可覆盖」：每 key 并发上限 /
+// 进程级总并发上限；默认 2/8）。数值非法（<1 或进程级 < 每 key）由 New
+// 校验 = 启动失败（配置错误 fail fast）。
 func WithLoadGate(perKey, total int) Option {
 	return func(o *options) {
-		gate, err := loadgate.New(perKey, total)
-		if err != nil {
-			o.loadErr = err
-			return
-		}
-		o.load = gate
+		o.gateSet = true
+		o.gatePerKey, o.gateTotal = perKey, total
 	}
 }
 
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
-// 限额越界（<500 或 >5000）/ 并发闸数值非法 = 启动失败（配置错误 fail fast）。
+// 限额越界 / 并发闸数值非法 = 启动失败（配置错误 fail fast）。
 func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
@@ -109,23 +98,22 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.loadErr != nil {
-		return nil, o.loadErr
+	// 并发闸恒启用（负载防护不缺席）：数值在此统一校验（option 只存数据，
+	// New 校验上报——与 WithExecuteSQL 限额同一惯例）；未注入取 spec 默认。
+	perKey, total := config.DefaultKeyConcurrency, config.DefaultProcessConcurrency
+	if o.gateSet {
+		perKey, total = o.gatePerKey, o.gateTotal
 	}
-	if o.load == nil {
-		gate, err := loadgate.New(keyConcurrencyDefault, processConcurrencyDefault)
-		if err != nil {
-			return nil, err // 常量默认值，不可达；防御
-		}
-		o.load = gate
+	var err error
+	if g.loadGate, err = loadgate.New(perKey, total); err != nil {
+		return nil, err
 	}
-	g.loadGate = o.load
 	g.execSQL = o.execSQL
 	if g.execSQL != nil && g.execSQL.router == nil {
 		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
 	}
-	if g.execSQL != nil && (g.execSQL.limit < sqlLimitDefault || g.execSQL.limit > sqlLimitMax) {
-		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, sqlLimitDefault, sqlLimitMax)
+	if g.execSQL != nil && (g.execSQL.limit < config.DefaultSQLLimit || g.execSQL.limit > sqlLimitMax) {
+		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, config.DefaultSQLLimit, sqlLimitMax)
 	}
 
 	if err := g.authz.Load(context.Background()); err != nil {

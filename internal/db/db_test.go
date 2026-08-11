@@ -1,6 +1,9 @@
 package db
 
 import (
+	"context"
+	"time"
+
 	"strings"
 	"testing"
 )
@@ -95,5 +98,19 @@ func TestParseEntriesErrorMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dsn") {
 		t.Fatalf("错误消息应指明缺失字段: %v", err)
+	}
+}
+
+// statement_timeout 非法值（0 = PG 关闭超时 / 负值 = 连接建立即失败）=
+// 启动失败 fail fast（负载防护不能被静默绕过）。
+func TestNewRouterStatementTimeoutValidation(t *testing.T) {
+	entries := []Entry{{DBName: "bss", Service: "bss", DSN: "postgres://dgw_ro@127.0.0.1:1/bss"}}
+	for _, bad := range []time.Duration{0, -1, -30 * time.Second} {
+		if _, err := NewRouter(context.Background(), entries, bad); err == nil {
+			t.Errorf("statementTimeout=%v 应启动失败", bad)
+		}
+	}
+	if _, err := NewRouter(context.Background(), entries, time.Millisecond); err != nil {
+		t.Errorf("statementTimeout=1ms 应合法: %v", err)
 	}
 }

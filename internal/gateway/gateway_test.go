@@ -46,6 +46,23 @@ func createKey(t *testing.T, st *store.Store, userID string) string {
 	return key
 }
 
+// keyIDForUser 查一把指定用户的 key 行 ID（每 key 并发闸的粒度标识，
+// 测试断言 details.key 时使用）。
+func keyIDForUser(t *testing.T, st *store.Store, userID string) string {
+	t.Helper()
+	keys, err := credentials.List(context.Background(), st.DB())
+	if err != nil {
+		t.Fatalf("credentials.List: %v", err)
+	}
+	for _, k := range keys {
+		if k.UserID == userID {
+			return strconv.FormatInt(k.ID, 10)
+		}
+	}
+	t.Fatalf("找不到 %s 的 key", userID)
+	return ""
+}
+
 // bearerTransport 给 SDK 客户端的每个请求附加 Authorization header。
 type bearerTransport struct {
 	token string
@@ -255,18 +272,7 @@ func sampleArgs(tool string) map[string]any {
 func TestHTTPIdentityPropagates(t *testing.T) {
 	g, st := newTestGateway(t)
 	key := createKey(t, st, "dev-alice")
-
-	// key 的行 ID = 每 key 并发闸的粒度标识（KeyFromContext 应读到它）
-	var wantKeyID string
-	keys, err := credentials.List(context.Background(), st.DB())
-	if err != nil {
-		t.Fatalf("credentials.List: %v", err)
-	}
-	for _, k := range keys {
-		if k.UserID == "dev-alice" {
-			wantKeyID = strconv.FormatInt(k.ID, 10)
-		}
-	}
+	wantKeyID := keyIDForUser(t, st, "dev-alice")
 
 	var mu sync.Mutex
 	var seenUser, seenKey string
@@ -327,18 +333,7 @@ func TestStdioRejectsInvalidKey(t *testing.T) {
 func TestStdioFormEndToEnd(t *testing.T) {
 	g, st := newTestGateway(t)
 	key := createKey(t, st, "dev-alice")
-
-	// key 的行 ID = 每 key 并发闸的粒度标识（KeyFromContext 应读到它）
-	var wantKeyID string
-	keys, err := credentials.List(context.Background(), st.DB())
-	if err != nil {
-		t.Fatalf("credentials.List: %v", err)
-	}
-	for _, k := range keys {
-		if k.UserID == "dev-alice" {
-			wantKeyID = strconv.FormatInt(k.ID, 10)
-		}
-	}
+	wantKeyID := keyIDForUser(t, st, "dev-alice")
 
 	var mu sync.Mutex
 	var seenUser, seenKey string

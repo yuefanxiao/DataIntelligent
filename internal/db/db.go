@@ -92,8 +92,13 @@ type Router struct {
 }
 
 // NewRouter 按路由表建池；statementTimeout 为连接级 statement_timeout。
+// statementTimeout 必须 > 0：0 在 PG 语义是「关闭超时」（静默绕过负载防护），
+// 负值 PG 在连接建立时 FATAL 拒绝（运行时全挂）——都属配置错误 fail fast。
 // 任一 DSN 不可解析 = 启动失败（fail fast：配置错误绝不能带病服务）。
 func NewRouter(ctx context.Context, entries []Entry, statementTimeout time.Duration) (*Router, error) {
+	if statementTimeout <= 0 {
+		return nil, fmt.Errorf("statement_timeout %v 非法（必须 > 0：0 = PG 关闭超时、负值 = 连接建立即失败）", statementTimeout)
+	}
 	r := &Router{routes: make(map[string]route, len(entries))}
 	for _, e := range entries {
 		cfg, err := pgxpool.ParseConfig(e.DSN)

@@ -126,18 +126,20 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 }
 
 // gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸）。
+// 并发闸恒注入：即使未配置 PG 路由，env 数值也经 WithLoadGate 校验
+// （越界配置同样启动失败，不会静默退化为默认 2/8）。
 func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
+	opts := []gateway.Option{
+		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
+	}
 	router, err := buildRouter(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	if router == nil {
-		return nil, func() {}, nil
+		return opts, func() {}, nil
 	}
-	opts := []gateway.Option{
-		gateway.WithExecuteSQL(router, cfg.SQLLimit),
-		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
-	}
+	opts = append(opts, gateway.WithExecuteSQL(router, cfg.SQLLimit))
 	return opts, router.Close, nil
 }
 

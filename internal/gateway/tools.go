@@ -6,7 +6,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
 )
 
@@ -73,15 +72,6 @@ func readOnly() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true}
 }
 
-// gateLimits 取并发闸数值（工具描述展示给 Agent 的实际配置；env 可配时
-// 描述与实际一致，而非硬编码 spec 默认值）。
-func gateLimits(g *Gateway) (perKey, total int) {
-	if g.loadGate == nil {
-		return config.DefaultKeyConcurrency, config.DefaultProcessConcurrency
-	}
-	return g.loadGate.Limits()
-}
-
 func registerTools(s *mcp.Server, g *Gateway) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_entities",
@@ -113,8 +103,9 @@ func registerTools(s *mcp.Server, g *Gateway) {
 		Annotations: readOnly(),
 	}, stub[listEnumValuesInput]("list_enum_values"))
 
-	// 并发闸数值动态注入（env 可配，Agent 侧描述与实际配置一致）。
-	perKey, processTotal := gateLimits(g)
+	// 并发闸数值动态注入（env 可配，Agent 侧描述与实际配置一致；
+	// New 保证 loadGate 恒非 nil）。
+	perKey, processTotal := g.loadGate.Limits()
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "execute_sql",
 		Description: fmt.Sprintf(
