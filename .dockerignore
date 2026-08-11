@@ -1,0 +1,11 @@
+# 镜像构建上下文裁剪（deploy/Dockerfile 的构建上下文 = 仓库根）。
+# 凭证文件绝不能进镜像（ADR-0009「凭证只在该机 env 文件」）；.git /
+# .scratch / 运行态文件同样不进层。
+.git
+.scratch
+dgw.db
+dgw.db-*
+bin/
+deploy/config/env
+deploy/demo/.env
+deploy/demo/run/

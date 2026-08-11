@@ -75,10 +75,12 @@ func validateEntry(e Entry) error {
 	return nil
 }
 
-// route 是单条 dbname 路由的运行时形态：连接池 + 服务归属（FQN 服务段）。
+// route 是单条 dbname 路由的运行时形态：连接池 + 服务归属（FQN 服务段）
+// + 原始 DSN（启动自检的纯净探测连接用它，selfcheck.go）。
 type route struct {
 	pool    *pgxpool.Pool
 	service string
+	dsn     string
 }
 
 // Router 是按 dbname 路由的池集合：启动时按 Entry 建池（连接惰性建立），
@@ -113,7 +115,7 @@ func NewRouter(ctx context.Context, entries []Entry, statementTimeout time.Durat
 			r.Close()
 			return nil, fmt.Errorf("dbname %q 建池失败: %w", e.DBName, err)
 		}
-		r.routes[e.DBName] = route{pool: pool, service: e.Service}
+		r.routes[e.DBName] = route{pool: pool, service: e.Service, dsn: e.DSN}
 	}
 	return r, nil
 }

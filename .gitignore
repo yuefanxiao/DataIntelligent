@@ -17,3 +17,8 @@ node_modules/
 .env.*
 *.pem
 *.key
+
+# 部署凭证 env 文件（ADR-0009：凭证只在宿主机该文件，不入 git）
+deploy/config/env
+deploy/demo/.env
+deploy/demo/run/
