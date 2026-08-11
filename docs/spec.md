@@ -143,7 +143,7 @@
 - **凭证边界**：数据库凭证只存在该机 env 文件，开发机/CI 零凭证；网关/采集器只用专用共享只读角色，永不超管。
 - **传输**：**双传输**——Streamable HTTP 为主（守护进程形态，go-sdk `RequireBearerToken` + 自实现 `TokenVerifier`），stdio 为调试形态（env 传 key）；官方 go-sdk v1.7.0+（双协议时代自动协商：2025-11-25 存量客户端走 legacy 握手、2026-07-28 客户端走无状态，DNS rebinding 防护、session hijack 防护开箱即用）。
 - **从库连接**：可配置 DSN 口子（host/port/用户/密码）+ 按 dbname 路由（Database 实体 = PG database）；生产网络通路方案（NodePort/port-forward/LB）生产部署时定，v1 不锁。
-- **启动自检**（不过拒启）：`pg_is_in_recovery() = true`（防连错主库）+ 角色级 statement_timeout 生效确认。
+- **启动自检**（不过拒启）：`pg_is_in_recovery() = true`（防连错主库）+ 角色级 statement_timeout 生效确认 + `current_database()` 与路由 dbname 一致（DSN 指错库拒启）。
 - **数据新鲜度**：接受从库异步复制延迟（秒级，v1 消费场景无感）；延迟监测后置。
 - **监控/告警、正式上线/回滚流程**：v1 不做；观测面 = 执行记录 + docker restart 兜底；回滚基线 = 旧镜像 tag + SQLite 文件备份恢复。
 
