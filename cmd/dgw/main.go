@@ -26,9 +26,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/config"
 	"github.com/yuefanxiao/DataIntelligent/internal/credentials"
+	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/gateway"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
@@ -89,6 +91,9 @@ env（flag 优先）：
   DGW_DB_PATH      SQLite 运行时存储路径（默认 ./dgw.db）
   DGW_HTTP_ADDR    HTTP 监听地址（默认 :8080）
   DGW_API_KEY      serve-stdio 的凭据
+  DGW_PG_DATABASES  execute_sql 路由表（JSON 数组 [{"dbname","service","dsn"}]；DSN 即数据库凭证）
+  DGW_SQL_LIMIT    execute_sql 行数上限（默认 500，范围 500-5000）
+  DGW_PG_STATEMENT_TIMEOUT_MS  statement_timeout 毫秒（默认 30000）
 `)
 }
 
@@ -105,6 +110,31 @@ func openStore(dbFlag string) *store.Store {
 	return st
 }
 
+// buildRouter 从 env 构建 execute_sql 的 PG 路由；未配置（DGW_PG_DATABASES
+// 为空）返回 nil——execute_sql 返回结构化「未配置」错误，网关其余功能照常。
+func buildRouter(cfg config.Config) (*db.Router, error) {
+	entries, err := db.ParseEntries(cfg.PGDatabases)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return db.NewRouter(context.Background(), entries, time.Duration(cfg.PGTimeoutMS)*time.Millisecond)
+}
+
+// gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额）。
+func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
+	router, err := buildRouter(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if router == nil {
+		return nil, func() {}, nil
+	}
+	return []gateway.Option{gateway.WithExecuteSQL(router, cfg.SQLLimit)}, router.Close, nil
+}
+
 func cmdServe() {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dbPath := fs.String("db", "", "SQLite 运行时存储路径（缺省取 DGW_DB_PATH）")
@@ -118,7 +148,12 @@ func cmdServe() {
 
 	st := openStore(*dbPath)
 	defer st.Close()
-	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	opts, closeRouter, err := gatewayOpts(cfg)
+	if err != nil {
+		log.Fatalf("execute_sql 路由配置错误: %v", err)
+	}
+	defer closeRouter()
+	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)), opts...)
 	if err != nil {
 		log.Fatalf("网关启动失败（权限快照加载失败）: %v", err)
 	}
@@ -136,10 +171,16 @@ func cmdServeStdio() {
 	dbPath := fs.String("db", "", "SQLite 运行时存储路径（缺省取 DGW_DB_PATH）")
 	fs.Parse(os.Args[2:])
 
-	apiKey := config.FromEnv().APIKey
+	cfg := config.FromEnv()
+	apiKey := cfg.APIKey
 	st := openStore(*dbPath)
 	defer st.Close()
-	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	opts, closeRouter, err := gatewayOpts(cfg)
+	if err != nil {
+		log.Fatalf("execute_sql 路由配置错误: %v", err)
+	}
+	defer closeRouter()
+	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)), opts...)
 	if err != nil {
 		log.Fatalf("网关启动失败（权限快照加载失败）: %v", err)
 	}

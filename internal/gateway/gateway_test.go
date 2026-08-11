@@ -215,6 +215,13 @@ func TestHTTPEndToEnd(t *testing.T) {
 			t.Fatalf("CallTool(%s): %v", tool, err)
 		}
 		e := decodeErrorResult(t, res)
+		if tool == "execute_sql" {
+			// execute_sql 已实装（04）：未注入 PG 路由时返回结构化「未配置」。
+			if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "not_configured" {
+				t.Errorf("CallTool(execute_sql) 错误 = %s [%s], want invalid_request/not_configured", e.Kind, e.Code)
+			}
+			continue
+		}
 		if e.Kind != gwerr.KindNotImplemented || e.Code != "DGW_NOT_IMPLEMENTED" {
 			t.Errorf("CallTool(%s) 错误 = %s [%s], want not_implemented/DGW_NOT_IMPLEMENTED", tool, e.Kind, e.Code)
 		}
@@ -339,8 +346,8 @@ func TestStdioFormEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if e := decodeErrorResult(t, res); e.Kind != gwerr.KindNotImplemented {
-		t.Errorf("错误 kind = %q, want not_implemented", e.Kind)
+	if e := decodeErrorResult(t, res); e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "not_configured" {
+		t.Errorf("错误 = %s [%s] reason=%v, want invalid_request/not_configured", e.Kind, e.Code, e.Details["reason"])
 	}
 
 	mu.Lock()
