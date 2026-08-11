@@ -25,7 +25,9 @@ Status: open
 
 ## Decisions so far
 
-<!-- 已关闭票据一行：标题 + 一句 gist + 链接 -->
+- [01 Research: MCP Go SDK 选型与协议能力](https://github.com/yuefanxiao/DataIntelligent/issues/2) — 推荐官方 modelcontextprotocol/go-sdk v1.7.0+（唯一双协议时代 Go SDK：自动协商 2025-11-25/2026-07-28，内置 RequireBearerToken 认证中间件、conformance 套件、GitHub 官方生产验证）；mark3labs/mcp-go（协议停在 2025-11-25）作备选。需自实现：TokenVerifier、权限引擎（联动 03）、SQL 只读强制/限额/脱敏、审计落库。
+- [06 Research: 语义层存储与检索方向](https://github.com/yuefanxiao/DataIntelligent/issues/7) — 语义层是 MB 级元数据（与业务数据量无关）；PG 原生（表 + JSONB + pgvector）作运行时存储 + YAML 文件作作者入口（自研 Go 编译/同步管线）；检索以结构化 SQL + 关键词为主，v1 跳过 embedding（免模型基建与数据出境）；v1 不引入图数据库（多跳遍历用关系边表 + WITH RECURSIVE）。
+- [09 Research: 开源方案现状对比（含高 star 项目）](https://github.com/yuefanxiao/DataIntelligent/issues/10) — 无现成开源项目等价于 Enterprise Data Context Layer：OpenMetadata（context + RBAC + 审计 + MCP，但不做 SQL 执行）与 Wren AI（语义引擎 + 受管 Text2SQL + MCP，OSS 缺企业权限/审计）各占一半；Vanna 已归档、pgai 停维护、MindsDB 转向 → 自研薄 Go 工具层方向成立，语义语法借鉴 MDL/MetricFlow（票据 05 参考），guardrails 借鉴 Wren（票据 10 参考），不选型任何项目作执行引擎。
 
 ## Not yet specified
 
@@ -43,4 +45,5 @@ Status: open
 - 独立 Agent 产品（工具层先行，Q6b）
 - 跨会话记忆与自进化（长期愿景，目的地重画时再议）
 - 数仓 / OLAP 分析
+
 

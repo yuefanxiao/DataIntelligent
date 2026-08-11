@@ -1,7 +1,7 @@
 # 01 Research: MCP Go SDK 选型与协议能力
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/2
-Status: closed
+Status: resolved
 Blocked by (open blockers): 0
 
 Part of #1
@@ -14,7 +14,9 @@ Go 生态中，MCP server SDK 应选哪个？（官方 modelcontextprotocol/go-s
 
 交付：推荐一个 + 理由 + 对 Gateway v1 工具面的能力边界影响（哪些能力 SDK 已提供、哪些要自己实现）。
 
-## Resolution（2026-08-11）
 
-推荐官方 `modelcontextprotocol/go-sdk`（v1.7.0+）：唯一支持 2026-07-28 协议且自动兼容 2025-11-25 的 Go SDK，官方 org + Google 维护、GitHub 官方 MCP server 生产验证、内置 Bearer token 中间件与 session 防劫持、方法级中间件。调研报告：docs/research/01-mcp-go-sdk.md。Gateway v1 需自实现：TokenVerifier（接自家 IdP/API key）、权限引擎、SQL 安全与限额、审计落库、工具集定义。
+## Answer
 
+推荐官方 modelcontextprotocol/go-sdk v1.7.0+（唯一双协议时代 Go SDK：自动协商 2025-11-25/2026-07-28，内置 RequireBearerToken 认证中间件、conformance 套件、GitHub 官方生产验证）；mark3labs/mcp-go（协议停在 2025-11-25）作备选。需自实现：TokenVerifier、权限引擎、SQL 只读强制/限额/脱敏、审计落库。
+
+完整调研报告见 issue 评论与分支 research 下的文件。

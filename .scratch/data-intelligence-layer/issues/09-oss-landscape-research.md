@@ -1,7 +1,7 @@
 # 09 Research: 开源方案现状对比（含高 star 项目）
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/10
-Status: open
+Status: resolved
 Blocked by (open blockers): 0
 
 Part of #1
@@ -16,3 +16,9 @@ Text2SQL / 语义层 / 数据 Agent 方向的开源方案现状对比——**不
 
 下游票据：05（本体模型参考）、10（SQL 生成路线决策）。
 
+
+## Answer
+
+无现成开源项目等价于 Enterprise Data Context Layer：OpenMetadata（context + RBAC + 审计 + MCP，不做 SQL 执行）与 Wren AI（语义引擎 + 受管 Text2SQL + MCP，OSS 缺企业权限/审计）各占一半；Vanna 已归档、pgai 停维护、MindsDB 转向 → 自研薄 Go 工具层方向成立，语义语法借鉴 MDL/MetricFlow，guardrails 借鉴 Wren，不选型任何项目作执行引擎。
+
+完整调研报告见 issue 评论与分支 research 下的文件。

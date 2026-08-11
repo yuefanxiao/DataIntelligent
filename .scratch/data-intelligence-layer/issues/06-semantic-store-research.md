@@ -1,7 +1,7 @@
 # 06 Research: 语义层存储与检索方向
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/7
-Status: closed (2026-08-11)
+Status: resolved
 Blocked by (open blockers): 0
 
 Part of #1
@@ -14,8 +14,9 @@ Part of #1
 
 结合 Go 生态与自托管部署成本，给出推荐方向（给事实与取舍，不要求最终决策——最终决策是票据 07）。
 
+
 ## Answer
 
-见 `docs/research/06-semantic-store-retrieval.md`（调研文件，含一手来源）与 `.scratch/data-intelligence-layer/issues/06-semantic-store-research.answer.md`（GitHub 评论正文）。
+语义层是 MB 级元数据（与业务数据量无关）；PG 原生（表 + JSONB + pgvector）作运行时存储 + YAML 文件作作者入口（自研 Go 编译/同步管线）；检索以结构化 SQL + 关键词为主，v1 跳过 embedding；v1 不引入图数据库（多跳遍历用关系边表 + WITH RECURSIVE）。
 
-一行 gist：语义层是 MB 级元数据（与业务数据量无关）；推荐 PG 原生表 + JSONB 为运行时存储、YAML 文件为作者入口（自研 Go 编译/同步）、结构化 SQL + pg_trgm 关键词检索为主（embedding/pgvector 留作 Phase 2）、v1 不引入图数据库；Metadata RAG 成熟做法 = 混合检索（词法/结构化为主、向量为辅），Agent 侧以 MCP 工具包 SQL 为标准形态。
+完整调研报告见 issue 评论与分支 research 下的文件。
