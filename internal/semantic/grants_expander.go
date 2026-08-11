@@ -2,9 +2,10 @@ package semantic
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 )
 
 // GrantExpander 实现 grants.Expander（授权对象 → 底层表清单），供
@@ -12,11 +13,11 @@ import (
 // 的依赖表来自 describes 边，服务/库级通配来自实体表清单——「指标有权底层
 // 没权」的悬空在此杜绝（展开为空 → grants.Sync 编译拒绝）。
 type GrantExpander struct {
-	st interface{ DB() *sql.DB }
+	st DBer
 }
 
 // NewGrantExpander 构造授权展开器（grants-apply 注入点）。
-func NewGrantExpander(st interface{ DB() *sql.DB }) *GrantExpander {
+func NewGrantExpander(st DBer) *GrantExpander {
 	return &GrantExpander{st: st}
 }
 
@@ -30,8 +31,8 @@ func NewGrantExpander(st interface{ DB() *sql.DB }) *GrantExpander {
 // 对象不存在 / 语义库未同步 → 空清单或错误（grants.Sync 编译拒绝）。
 func (g *GrantExpander) Expand(ctx context.Context, target string) ([]string, error) {
 	switch {
-	case strings.HasPrefix(target, "metric:"):
-		name := strings.TrimPrefix(target, "metric:")
+	case strings.HasPrefix(target, grants.PrefixMetric):
+		name := strings.TrimPrefix(target, grants.PrefixMetric)
 		e, err := GetEntity(ctx, g.st, name)
 		if err != nil {
 			return nil, err
@@ -47,8 +48,8 @@ func (g *GrantExpander) Expand(ctx context.Context, target string) ([]string, er
 			return nil, fmt.Errorf("指标 %q 未声明依赖表（YAML metrics.tables 为空——悬空授权，拒绝）", name)
 		}
 		return tbls, nil
-	case strings.HasPrefix(target, "concept:"):
-		name := strings.TrimPrefix(target, "concept:")
+	case strings.HasPrefix(target, grants.PrefixConcept):
+		name := strings.TrimPrefix(target, grants.PrefixConcept)
 		e, err := GetEntity(ctx, g.st, name)
 		if err != nil {
 			return nil, err
@@ -64,8 +65,8 @@ func (g *GrantExpander) Expand(ctx context.Context, target string) ([]string, er
 			return nil, fmt.Errorf("概念 %q 未描述任何表（悬空授权，拒绝）", name)
 		}
 		return tbls, nil
-	case strings.HasPrefix(target, "service:"):
-		name := strings.TrimPrefix(target, "service:")
+	case strings.HasPrefix(target, grants.PrefixService):
+		name := strings.TrimPrefix(target, grants.PrefixService)
 		tbls, err := TablesForService(ctx, g.st, name)
 		if err != nil {
 			return nil, err
@@ -74,8 +75,8 @@ func (g *GrantExpander) Expand(ctx context.Context, target string) ([]string, er
 			return nil, fmt.Errorf("服务 %q 无表（语义库未同步或服务不存在——通配展开为空，拒绝）", name)
 		}
 		return tbls, nil
-	case strings.HasPrefix(target, "database:"):
-		name := strings.TrimPrefix(target, "database:")
+	case strings.HasPrefix(target, grants.PrefixDatabase):
+		name := strings.TrimPrefix(target, grants.PrefixDatabase)
 		tbls, err := TablesForDatabase(ctx, g.st, name)
 		if err != nil {
 			return nil, err

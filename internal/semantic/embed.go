@@ -3,23 +3,24 @@ package semantic
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// Embedder 是 embedding 生成的接口（ADR-0002：外部 OpenAI text-embedding-3，
-// 同步期写入向量；失败降级不阻塞同步）。
+// Embedder 是 embedding 生成的接口（ADR-0002：外部 OpenAI text-embedding-3
+// 系列，同步期写入向量；失败降级不阻塞同步）。
 //
 // v1 生产实现 = OpenAIEmbedder（OpenAI API）；测试注入 fake。检索消费
 // （sqlite-vec / 暴力余弦）在 08 票，本包只保证「向量已写入」。
 type Embedder interface {
-	// Embed 返回输入文本的向量（float32 序列，text-embedding-3 为 1536 维）。
+	// Embed 返回输入文本的向量（float32 序列，text-embedding-3-small 为
+	// 1536 维；large 为 3072 维）。
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
@@ -32,11 +33,16 @@ type OpenAIEmbedder struct {
 	batchSize int
 }
 
+// DefaultEmbeddingModel 是 v1 默认 embedding 模型：text-embedding-3-small
+// （OpenAI 真实模型 id，1536 维；spec §4.9 参数表写的「text-embedding-3」
+// 是系列名简写，不是可调用的模型 id）。
+const DefaultEmbeddingModel = "text-embedding-3-small"
+
 // NewOpenAIEmbedder 构造 OpenAI embedding 客户端（env DGW_OPENAI_API_KEY）。
-// model 缺省 text-embedding-3（spec §4.9 参数表）。
+// model 缺省 DefaultEmbeddingModel（spec §4.9 参数表「env 可覆盖」）。
 func NewOpenAIEmbedder(apiKey, model string) *OpenAIEmbedder {
 	if model == "" {
-		model = "text-embedding-3"
+		model = DefaultEmbeddingModel
 	}
 	return &OpenAIEmbedder{
 		apiKey:    apiKey,
@@ -48,14 +54,18 @@ func NewOpenAIEmbedder(apiKey, model string) *OpenAIEmbedder {
 
 const openAIEmbeddingsURL = "https://api.openai.com/v1/embeddings"
 
-// Embed 分批发请求（重试一次，仍失败返回错误——调用方降级不阻塞）。
+// Embed 分批发请求；单个批次失败重试一次（网络抖动自愈），仍失败返回
+// 错误——调用方降级不阻塞。
 func (o *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, 0, len(texts))
 	for start := 0; start < len(texts); start += o.batchSize {
 		end := min(start+o.batchSize, len(texts))
 		vecs, err := o.embedBatch(ctx, texts[start:end])
 		if err != nil {
-			return nil, err
+			vecs, err = o.embedBatch(ctx, texts[start:end]) // 重试一次
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, vecs...)
 	}
@@ -128,7 +138,7 @@ func embedEntity(e Entity) string {
 }
 
 // SaveEmbeddings 把实体向量写入 dgw_sem_embeddings（幂等 upsert）。
-func SaveEmbeddings(ctx context.Context, st interface{ DB() *sql.DB }, model string, fqns []string, vecs [][]float32) error {
+func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, vecs [][]float32) error {
 	if len(fqns) != len(vecs) {
 		return fmt.Errorf("SaveEmbeddings: %d 个 FQN vs %d 个向量", len(fqns), len(vecs))
 	}
@@ -168,10 +178,12 @@ func decodeFloats(b []byte) ([]float32, error) {
 	return out, nil
 }
 
-// EmbedEntityTexts 是同步期生成 embedding 的公共入口：对 target 里全部实体
-// 生成文本 → 调 Embedder 生成向量 → 写入。失败降级：embedding 出错只记日志
-// 不阻断同步（验收「失败降级不阻塞同步」）。返回实际写入的实体数。
-func EmbedEntityTexts(ctx context.Context, st interface{ DB() *sql.DB }, target *Target, emb Embedder, model string, logf func(format string, args ...any)) (int, error) {
+// EmbedEntityTexts 是同步期生成 embedding 的公共入口：对 target 里（已变更
+// 的）实体生成文本 → 调 Embedder 生成向量 → 写入。调用方传「变更实体」
+// （diff 的 Added + Updated）即满足 ADR-0002「增量只嵌入变更实体」。失败
+// 降级：embedding 出错只记日志不阻断同步（验收「失败降级不阻塞同步」）。
+// 返回实际写入的实体数。
+func EmbedEntityTexts(ctx context.Context, st DBer, target *Target, emb Embedder, model string, logf func(format string, args ...any)) (int, error) {
 	if emb == nil {
 		return 0, nil // 未配置 embedding（无 API key）= 跳过，不阻塞
 	}
@@ -198,4 +210,21 @@ func EmbedEntityTexts(ctx context.Context, st interface{ DB() *sql.DB }, target 
 		return 0, nil
 	}
 	return len(fqns), nil
+}
+
+// RemoveEmbeddings 删除实体的向量（墓碑对应面：实体被墓碑化后其向量一并
+// 清理，检索不再命中死实体；幂等，可重复调用）。
+func RemoveEmbeddings(ctx context.Context, st DBer, fqns []string) error {
+	if len(fqns) == 0 {
+		return nil
+	}
+	query := "DELETE FROM dgw_sem_embeddings WHERE entity_fqn IN (?" + strings.Repeat(",?", len(fqns)-1) + ")"
+	args := make([]any, len(fqns))
+	for i, f := range fqns {
+		args[i] = f
+	}
+	if _, err := st.DB().ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("remove embeddings: %w", err)
+	}
+	return nil
 }

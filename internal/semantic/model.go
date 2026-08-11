@@ -15,10 +15,18 @@
 package semantic
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+// DBer 是语义层访问运行时存储的最小接口（store.Store 实现；测试可注入
+// 任意 DB() *sql.DB 的对象）。查询/应用/备份函数一律以 DBer 收口，
+// 不依赖具体 store 类型（ADR-0005「存储接口抽象保留」）。
+type DBer interface {
+	DB() *sql.DB
+}
 
 // Kind 是六类实体的类型枚举（ADR-0001）。
 type Kind string

@@ -2,7 +2,6 @@ package semantic
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -507,6 +506,52 @@ func TestRuntimeDoesNotReadYAML(t *testing.T) {
 	}
 }
 
+// 验收 1 补充：关系边双向可遍历（ADR-0001「四类关系边双向可遍历」）——
+// 反向查询（dst → src）与正向（src → dst）都可用。
+func TestRelationBidirectionalTraversal(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	dir := sampleDir(t)
+	if _, err := Sync(ctx, st, dir); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// 正向：服务 → 库（connects_to）
+	fwd, err := relationTargets(ctx, st, RelConnectsTo, "payment-service")
+	if err != nil {
+		t.Fatalf("正向 connects_to: %v", err)
+	}
+	if len(fwd) != 1 || fwd[0] != "payment-service.payment_db" {
+		t.Errorf("正向 connects_to = %v, want [payment-service.payment_db]", fwd)
+	}
+	// 反向：库 → 服务（dst 查 src）
+	rev, err := relationSources(ctx, st, RelConnectsTo, "payment-service.payment_db")
+	if err != nil {
+		t.Fatalf("反向 connects_to: %v", err)
+	}
+	if len(rev) != 1 || rev[0] != "payment-service" {
+		t.Errorf("反向 connects_to = %v, want [payment-service]", rev)
+	}
+
+	// 反向 contains：表 → 库
+	rev2, err := relationSources(ctx, st, RelContains, "payment-service.payment_db.payments")
+	if err != nil {
+		t.Fatalf("反向 contains: %v", err)
+	}
+	if len(rev2) != 1 || rev2[0] != "payment-service.payment_db" {
+		t.Errorf("反向 contains = %v, want [payment-service.payment_db]", rev2)
+	}
+
+	// references 反向：被引用表 → 引用它的表（samples 里 orders 被 payments 引用）
+	rev3, err := relationSources(ctx, st, RelReferences, "order-service.order_db.orders")
+	if err != nil {
+		t.Fatalf("反向 references: %v", err)
+	}
+	if len(rev3) != 1 || rev3[0] != "payment-service.payment_db.payments" {
+		t.Errorf("反向 references = %v, want [payment-service.payment_db.payments]", rev3)
+	}
+}
+
 // --- helpers ---
 
 func listEnumsForTest(ctx context.Context, st *store.Store, colFQN string) ([]string, error) {
@@ -555,4 +600,4 @@ func equalDiff(a, b *Diff) bool {
 }
 
 // sql.DB 接口断言（防止签名漂移）：semantic 包的查询函数接受任何 DB() *sql.DB。
-var _ interface{ DB() *sql.DB } = (*store.Store)(nil)
+var _ DBer = (*store.Store)(nil)

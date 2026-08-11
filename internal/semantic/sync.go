@@ -2,7 +2,6 @@ package semantic
 
 import (
 	"context"
-	"database/sql"
 )
 
 // Result 是一次同步管线（或 dry-run）的完整产出。
@@ -19,16 +18,16 @@ type Result struct {
 //   - 应用阶段失败 → 事务回滚，零写库。
 //
 // 幂等：同输入重跑 → diff 为空、库无变化。
-func Sync(ctx context.Context, st interface{ DB() *sql.DB }, dir string) (*Result, error) {
+func Sync(ctx context.Context, st DBer, dir string) (*Result, error) {
 	return run(ctx, st, dir, true)
 }
 
 // DryRun 只做 编译 + diff，不写库（§5.3 seam：dry-run 确定性测试对象）。
-func DryRun(ctx context.Context, st interface{ DB() *sql.DB }, dir string) (*Result, error) {
+func DryRun(ctx context.Context, st DBer, dir string) (*Result, error) {
 	return run(ctx, st, dir, false)
 }
 
-func run(ctx context.Context, st interface{ DB() *sql.DB }, dir string, apply bool) (*Result, error) {
+func run(ctx context.Context, st DBer, dir string, apply bool) (*Result, error) {
 	in, err := Load(dir)
 	if err != nil {
 		return nil, err

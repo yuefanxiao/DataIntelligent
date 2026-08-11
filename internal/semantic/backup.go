@@ -2,7 +2,6 @@ package semantic
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -17,7 +16,7 @@ import (
 //  2. 逐字节拷贝主库文件到 dst。
 //
 // dst 是目标文件路径（调用方负责目录存在；覆盖已存在文件）。
-func Backup(ctx context.Context, st interface{ DB() *sql.DB }, dst string) error {
+func Backup(ctx context.Context, st DBer, dst string) error {
 	if _, err := st.DB().ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return fmt.Errorf("WAL checkpoint: %w", err)
 	}
@@ -34,7 +33,7 @@ func Backup(ctx context.Context, st interface{ DB() *sql.DB }, dst string) error
 }
 
 // mainDBPath 经 PRAGMA database_list 取主库（seq=0）文件路径。
-func mainDBPath(ctx context.Context, st interface{ DB() *sql.DB }) (string, error) {
+func mainDBPath(ctx context.Context, st DBer) (string, error) {
 	rows, err := st.DB().QueryContext(ctx, "PRAGMA database_list")
 	if err != nil {
 		return "", fmt.Errorf("PRAGMA database_list: %w", err)

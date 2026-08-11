@@ -17,7 +17,7 @@ func Snapshot(ctx context.Context, st interface {
 }
 
 type snapshotter struct {
-	st interface{ DB() *sql.DB }
+	st DBer
 }
 
 func (s *snapshotter) snapshot(ctx context.Context) (*Target, error) {

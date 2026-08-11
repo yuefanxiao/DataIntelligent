@@ -14,7 +14,7 @@ import (
 
 // GetEntity 按 FQN 查实体（含墓碑过滤；墓碑实体返回 nil 实体 + nil 错误，
 // 检索默认过滤墓碑，ADR-0002 墓碑语义）。
-func GetEntity(ctx context.Context, st interface{ DB() *sql.DB }, fqn string) (*Entity, error) {
+func GetEntity(ctx context.Context, st DBer, fqn string) (*Entity, error) {
 	var e Entity
 	var kind string
 	var isTime, tombstone int
@@ -38,7 +38,7 @@ func GetEntity(ctx context.Context, st interface{ DB() *sql.DB }, fqn string) (*
 
 // ListTables 返回全部活跃表实体（服务.库.表），按 FQN 排序。
 // 授权展开与 08 票检索共用。
-func ListTables(ctx context.Context, st interface{ DB() *sql.DB }) ([]Entity, error) {
+func ListTables(ctx context.Context, st DBer) ([]Entity, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT fqn, name, description, COALESCE(pg_schema,'')
 		FROM dgw_sem_entities WHERE kind = 'table' AND tombstone = 0
@@ -63,7 +63,7 @@ func ListTables(ctx context.Context, st interface{ DB() *sql.DB }) ([]Entity, er
 }
 
 // relationTargets 返回某实体经指定类型边指向的目标 FQN 列表（去重、排序）。
-func relationTargets(ctx context.Context, st interface{ DB() *sql.DB }, typ RelationType, src string) ([]string, error) {
+func relationTargets(ctx context.Context, st DBer, typ RelationType, src string) ([]string, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT dst_fqn FROM dgw_sem_relations
 		WHERE type = ? AND src_fqn = ? AND tombstone = 0
@@ -86,15 +86,41 @@ func relationTargets(ctx context.Context, st interface{ DB() *sql.DB }, typ Rela
 	return out, nil
 }
 
+// relationSources 返回经指定类型边指向某实体的源 FQN 列表（反向遍历，
+// ADR-0001「双向可遍历」：沿 dst 索引查 src）。08 票 traverse_relations
+// 的双向语义即由此支撑。
+func relationSources(ctx context.Context, st DBer, typ RelationType, dst string) ([]string, error) {
+	rows, err := st.DB().QueryContext(ctx, `
+		SELECT src_fqn FROM dgw_sem_relations
+		WHERE type = ? AND dst_fqn = ? AND tombstone = 0
+		ORDER BY src_fqn`, string(typ), dst)
+	if err != nil {
+		return nil, fmt.Errorf("query %s reverse edges: %w", typ, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var fqn string
+		if err := rows.Scan(&fqn); err != nil {
+			return nil, err
+		}
+		out = append(out, fqn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MetricTables 返回指标依赖的底层表（describes 边 dst，指标授权展开依据）。
-func MetricTables(ctx context.Context, st interface{ DB() *sql.DB }, metricFQN string) ([]string, error) {
+func MetricTables(ctx context.Context, st DBer, metricFQN string) ([]string, error) {
 	return relationTargets(ctx, st, RelDescribes, metricFQN)
 }
 
 // ConceptTables 返回概念授权的展开表清单：概念 describes 的表直接计入，
 // 列归到所属表，指标递归展开为其依赖表。空 = 概念不触任何表（授权展开为
 // 空清单，按编译拒绝处理——「指标有权底层没权」的悬空同样适用于概念）。
-func ConceptTables(ctx context.Context, st interface{ DB() *sql.DB }, conceptFQN string) ([]string, error) {
+func ConceptTables(ctx context.Context, st DBer, conceptFQN string) ([]string, error) {
 	targets, err := relationTargets(ctx, st, RelDescribes, conceptFQN)
 	if err != nil {
 		return nil, err
@@ -141,17 +167,17 @@ func tableOfColumn(colFQN string) string {
 }
 
 // TablesForService 返回服务下全部活跃表（服务级通配展开）。
-func TablesForService(ctx context.Context, st interface{ DB() *sql.DB }, service string) ([]string, error) {
+func TablesForService(ctx context.Context, st DBer, service string) ([]string, error) {
 	prefix := service + "."
 	return tablesByPrefix(ctx, st, prefix)
 }
 
 // TablesForDatabase 返回库下全部活跃表（库级通配展开）。
-func TablesForDatabase(ctx context.Context, st interface{ DB() *sql.DB }, database string) ([]string, error) {
+func TablesForDatabase(ctx context.Context, st DBer, database string) ([]string, error) {
 	return tablesByPrefix(ctx, st, database+".")
 }
 
-func tablesByPrefix(ctx context.Context, st interface{ DB() *sql.DB }, prefix string) ([]string, error) {
+func tablesByPrefix(ctx context.Context, st DBer, prefix string) ([]string, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT fqn FROM dgw_sem_entities
 		WHERE kind = 'table' AND tombstone = 0 AND fqn LIKE ?

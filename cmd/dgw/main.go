@@ -403,31 +403,36 @@ func cmdSemanticSync() {
 	// 应用后的通配覆盖告警：新表不在通配快照 = 默认拒绝，提示重展开。
 	warnPatternCoverage(ctx, st)
 
-	// embedding：失败降级不阻塞（验收标准）。
+	// embedding（ADR-0002「增量只嵌入变更实体」）：只对 diff 的
+	// Added + Updated 实体生成向量；墓碑实体清理向量。失败降级不阻塞。
 	if key := os.Getenv(config.EnvOpenAIKey); key != "" {
-		emb := semantic.NewOpenAIEmbedder(key, "")
-		n, embErr := semantic.EmbedEntityTexts(ctx, st, mustSnapshot(ctx, st), emb, "text-embedding-3",
+		model := os.Getenv(config.EnvEmbeddingModel)
+		if model == "" {
+			model = semantic.DefaultEmbeddingModel
+		}
+		emb := semantic.NewOpenAIEmbedder(key, model)
+		changed := &semantic.Target{Entities: append(
+			append([]semantic.Entity{}, res.Diff.EntitiesAdded...), res.Diff.EntitiesUpdated...)}
+		n, embErr := semantic.EmbedEntityTexts(ctx, st, changed, emb, model,
 			func(format string, args ...any) { log.Printf(format, args...) })
 		if embErr != nil {
 			log.Printf("embedding 降级提示: %v", embErr)
 		}
 		if n > 0 {
-			log.Printf("已生成 %d 个实体向量（text-embedding-3）", n)
+			log.Printf("已生成 %d 个实体向量（%s）", n, model)
+		}
+		deleted := make([]string, 0, len(res.Diff.EntitiesDeleted))
+		for _, e := range res.Diff.EntitiesDeleted {
+			deleted = append(deleted, e.FQN)
+		}
+		if err := semantic.RemoveEmbeddings(ctx, st, deleted); err != nil {
+			log.Printf("清理墓碑实体向量失败（降级不阻塞）: %v", err)
 		}
 	}
 	fmt.Printf("dgw: 语义同步完成（实体 upsert %d / 墓碑 %d，边 %d/%d，枚举 %d/%d）\n",
 		res.Stats.EntitiesUpserted, res.Stats.EntitiesTombstoned,
 		res.Stats.RelationsUpserted, res.Stats.RelationsTombstoned,
 		res.Stats.EnumsUpserted, res.Stats.EnumsTombstoned)
-}
-
-// mustSnapshot 取当前语义快照（embedding 的实体面；Sync 后即最新状态）。
-func mustSnapshot(ctx context.Context, st *store.Store) *semantic.Target {
-	t, err := semantic.Snapshot(ctx, st)
-	if err != nil {
-		log.Fatalf("读取语义快照失败: %v", err)
-	}
-	return t
 }
 
 // printDiff 打印 dry-run diff（CLI 展示：增删改清单）。

@@ -192,14 +192,14 @@ func (c *compiler) checkMetricSQL(m metricDef) error {
 	// 验证可解析；不验证列名（列归属由 describes 的表承载，运行时校验）。
 	probe := "SELECT " + m.Expression
 	if err := parseProbe(probe); err != nil {
-		return fmt.Errorf("指标 %q 的 expression 不可解析: %v", m.Name, err)
+		return fmt.Errorf("指标 %q 的 expression 不可解析: %w", m.Name, err)
 	}
 	if strings.TrimSpace(m.Filter) != "" {
 		// filter 是 WHERE 条件片段，同样必须可解析（写坏的过滤会在
 		// get_metric_definition 的 dry-run 展开时炸，编译期拒绝更早暴露）。
 		probeFilter := "SELECT 1 FROM (SELECT 1) _t WHERE " + m.Filter
 		if err := parseProbe(probeFilter); err != nil {
-			return fmt.Errorf("指标 %q 的 filter 不可解析: %v", m.Name, err)
+			return fmt.Errorf("指标 %q 的 filter 不可解析: %w", m.Name, err)
 		}
 	}
 	return nil
