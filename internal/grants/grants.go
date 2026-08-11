@@ -74,8 +74,10 @@ func validateName(target, prefix, what string) error {
 	if name == "" {
 		return fmt.Errorf("%s授权对象 %q 缺名字（%s名字）", what, target, what)
 	}
-	if strings.ContainsAny(name, ". \t\r\n") {
-		return fmt.Errorf("%s授权对象 %q 名字不能含点或空白", what, target)
+	// \x00 是内部复合键分隔符（expandKey），名字含它会导致授权/告警键错位
+	// （review 修复：与点/空白同组拒绝）。
+	if strings.ContainsAny(name, ".\x00 \t\r\n") {
+		return fmt.Errorf("%s授权对象 %q 名字不能含点/空白/控制字符", what, target)
 	}
 	return nil
 }

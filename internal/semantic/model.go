@@ -101,14 +101,15 @@ type Target struct {
 	Enums     []EnumValue
 }
 
-// EntityFQN 按层级拼接 FQN（parts 非空、每段非空）。
+// EntityFQN 按层级拼接 FQN（parts 非空、每段非空、不含控制字符——
+// \x00 是授权复合键分隔符，名字含它会导致键错位，review 修复）。
 func EntityFQN(parts ...string) (string, error) {
 	for i, p := range parts {
 		if p == "" {
 			return "", fmt.Errorf("FQN 第 %d 段为空", i+1)
 		}
-		if strings.ContainsAny(p, ". \t\r\n") {
-			return "", fmt.Errorf("FQN 段 %q 不能含点或空白", p)
+		if strings.ContainsAny(p, ".\x00 \t\r\n") {
+			return "", fmt.Errorf("FQN 段 %q 不能含点/空白/控制字符", p)
 		}
 	}
 	return strings.Join(parts, "."), nil

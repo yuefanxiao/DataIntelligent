@@ -471,26 +471,32 @@ func printDiff(d *semantic.Diff) {
 // 按 user×pattern 逐项而非跨用户汇总：用户 A 的 service:x 快照过期时，即使
 // 用户 B 恰好持有该表，A 的告警也必须报出（过期的是 A 的展开面）。
 func warnPatternCoverage(ctx context.Context, st *store.Store) {
-	patterns, err := grants.SyncPatterns(ctx, st)
-	if err != nil {
-		log.Printf("读取通配声明失败（跳过覆盖检查）: %v", err)
-		return
-	}
-	if len(patterns) == 0 {
-		return
-	}
-	// 用户 × 表授权集合（覆盖判定面）。
-	userGrants := map[string]map[string]bool{}
+	// 用户 × 表授权集合（覆盖判定面，残留授权检查共用）。
 	grantsList, err := grants.Snapshot(ctx, st)
 	if err != nil {
 		log.Printf("读取授权快照失败（跳过覆盖检查）: %v", err)
 		return
 	}
+	userGrants := map[string]map[string]bool{}
 	for _, g := range grantsList {
 		if userGrants[g.User] == nil {
 			userGrants[g.User] = map[string]bool{}
 		}
 		userGrants[g.User][g.TableFQN] = true
+	}
+
+	// 删除方向：授权指向的表在语义库中已墓碑/不存在 = 残留授权
+	// （review 修复：语义删除不自动撤权——授权事实源在 grants YAML，
+	// 但必须有管线提示，否则「指标有权底层没权」的反向悬空无人知晓）。
+	warnStaleGrants(ctx, st, grantsList)
+
+	patterns, err := grants.SyncPatterns(ctx, st)
+	if err != nil {
+		log.Printf("读取通配声明失败（跳过通配覆盖检查）: %v", err)
+		return
+	}
+	if len(patterns) == 0 {
+		return
 	}
 
 	uncovered := 0
@@ -521,6 +527,29 @@ func warnPatternCoverage(ctx context.Context, st *store.Store) {
 	}
 	if uncovered > 0 {
 		log.Printf("共 %d 张新表不在通配授权快照中（默认拒绝）", uncovered)
+	}
+}
+
+// warnStaleGrants 检查授权快照里指向墓碑/不存在表的残留授权：语义实体被
+// 删除后，展开快照（dgw_table_grants）原样保留——业务数据面照常放行。
+// 只告警不撤权（撤权 = 改 grants YAML + 重跑 grants-apply，git review 闸门），
+// 与 ADR-0004「重展开确认」同一哲学。
+func warnStaleGrants(ctx context.Context, st *store.Store, grantsList []grants.Grant) {
+	stale := 0
+	for _, g := range grantsList {
+		e, err := semantic.GetEntity(ctx, st, g.TableFQN)
+		if err != nil {
+			log.Printf("残留授权检查失败（%s × %s）: %v", g.User, g.TableFQN, err)
+			continue
+		}
+		if e == nil {
+			stale++
+			log.Printf("管线告警：用户 %s 对表 %s 的授权指向已删除/墓碑实体（残留授权；若不再需要请从 grants YAML 移除并重跑 grants-apply）",
+				g.User, g.TableFQN)
+		}
+	}
+	if stale > 0 {
+		log.Printf("共 %d 条残留授权指向已删除实体（业务数据面仍放行，建议清理）", stale)
 	}
 }
 

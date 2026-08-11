@@ -177,11 +177,15 @@ func TablesForDatabase(ctx context.Context, st DBer, database string) ([]string,
 	return tablesByPrefix(ctx, st, database+".")
 }
 
+// tablesByPrefix 精确前缀匹配：LIKE 的 %/_ 会被当通配符（服务名/库名含
+// 下划线时授权展开会静默越界到变体服务——review 修复），改用 substr 精确
+// 比较，前缀中的 %/_ 一律字面处理。
 func tablesByPrefix(ctx context.Context, st DBer, prefix string) ([]string, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT fqn FROM dgw_sem_entities
-		WHERE kind = 'table' AND tombstone = 0 AND fqn LIKE ?
-		ORDER BY fqn`, prefix+"%")
+		WHERE kind = 'table' AND tombstone = 0
+		  AND substr(fqn, 1, length(?)) = ? COLLATE BINARY
+		ORDER BY fqn`, prefix, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("tables by prefix %q: %w", prefix, err)
 	}

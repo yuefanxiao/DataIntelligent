@@ -149,6 +149,7 @@ func (d *Diff) Count() int {
 func Compare(target *Target, cur *Target) *Diff {
 	d := &Diff{}
 	curEnt := byEntityFQN(cur.Entities)
+	targetEnt := byEntityFQN(target.Entities)
 	for _, e := range target.Entities {
 		if prev, ok := curEnt[e.FQN]; ok {
 			if entityChanged(prev, e) {
@@ -159,7 +160,7 @@ func Compare(target *Target, cur *Target) *Diff {
 		}
 	}
 	for _, e := range cur.Entities {
-		if !hasEntity(target.Entities, e.FQN) {
+		if _, ok := targetEnt[e.FQN]; !ok {
 			d.EntitiesDeleted = append(d.EntitiesDeleted, e)
 		}
 	}
@@ -203,15 +204,6 @@ func entityChanged(a, b Entity) bool {
 		a.DataType != b.DataType || a.IsTime != b.IsTime ||
 		a.PGSchema != b.PGSchema || a.Expression != b.Expression ||
 		a.Aggregation != b.Aggregation || a.Filter != b.Filter
-}
-
-func hasEntity(ents []Entity, fqn string) bool {
-	for _, e := range ents {
-		if e.FQN == fqn {
-			return true
-		}
-	}
-	return false
 }
 
 func byEntityFQN(ents []Entity) map[string]Entity {

@@ -11,7 +11,7 @@ import (
 // 编译是纯函数（输入 rawInput，输出 Target）：同输入同输出（§5.3 seam 的
 // 确定性前提）；不触库、不触网。
 func Compile(in *rawInput) (*Target, error) {
-	c := &compiler{entities: map[string]Entity{}, kinds: map[string]Kind{}}
+	c := &compiler{entities: map[string]Entity{}}
 	for _, sf := range in.services {
 		if err := c.compileService(sf); err != nil {
 			return nil, err
@@ -36,9 +36,8 @@ func Compile(in *rawInput) (*Target, error) {
 }
 
 type compiler struct {
-	entities  map[string]Entity // 按 FQN（含 kind 记录，供引用校验）
-	kinds     map[string]Kind
-	order     []Entity // 编译顺序（服务→库→表→列→指标→概念），diff 展示稳定
+	entities  map[string]Entity // 按 FQN（kind 从实体取，不另存）
+	order     []Entity          // 编译顺序（服务→库→表→列→指标→概念），diff 展示稳定
 	relations []Relation
 	enums     []EnumValue
 }
@@ -49,7 +48,6 @@ func (c *compiler) addEntity(e Entity) error {
 			e.FQN, prev.Kind, e.Kind)
 	}
 	c.entities[e.FQN] = e
-	c.kinds[e.FQN] = e.Kind
 	c.order = append(c.order, e)
 	return nil
 }
@@ -60,12 +58,12 @@ func (c *compiler) addRelation(t RelationType, src, dst, meta string) {
 
 // require 校验实体存在且 kind 符合预期；缺失 = 引用完整性错误。
 func (c *compiler) require(fqn string, want Kind, what string) error {
-	kind, ok := c.kinds[fqn]
+	e, ok := c.entities[fqn]
 	if !ok {
 		return fmt.Errorf("%w: %s 引用 %q 不存在（引用完整性校验）", ErrRefMissing, what, fqn)
 	}
-	if kind != want {
-		return fmt.Errorf("%s 引用 %q：类型是 %s，需要 %s", what, fqn, kind, want)
+	if e.Kind != want {
+		return fmt.Errorf("%s 引用 %q：类型是 %s，需要 %s", what, fqn, e.Kind, want)
 	}
 	return nil
 }
@@ -117,6 +115,14 @@ func (c *compiler) compileTable(service, dbName string, tbl tableDef) error {
 		if err := c.require(ref.To, KindTable, fmt.Sprintf("表 %s 的 references", tblFQN)); err != nil {
 			return err
 		}
+		// join 条件（on 子句）也是 SQL 片段：坏条件在运行时才炸 = 口径
+		// 校验缺口，编译期同样探针（review 修复）。
+		if strings.TrimSpace(ref.On) != "" {
+			probe := "SELECT 1 FROM (SELECT 1) _a, (SELECT 1) _b WHERE " + ref.On
+			if err := parseProbe(probe); err != nil {
+				return fmt.Errorf("表 %s 的 references on 条件不可解析: %w", tblFQN, err)
+			}
+		}
 		c.addRelation(RelReferences, tblFQN, ref.To, ref.On)
 	}
 	return nil
@@ -153,12 +159,22 @@ func (c *compiler) compileEnums(colFQN string, values []enumValueDef) error {
 	return nil
 }
 
-func (c *compiler) compileMetric(m metricDef) error {
-	if m.Name == "" {
-		return fmt.Errorf("指标缺 name 字段")
+// validateSimpleName 校验指标/概念的单段命名空间名字：非空、不含点、
+// 不含空白与控制字符（\x00 会被 grants 的复合键分隔符使用，必须拒绝——
+// review 修复：与 grants.validateName 同规则，编译面先行）。
+func validateSimpleName(kind, name string) error {
+	if name == "" {
+		return fmt.Errorf("%s缺 name 字段", kind)
 	}
-	if strings.Contains(m.Name, ".") {
-		return fmt.Errorf("指标 FQN %q 含点（指标是独立命名空间，用单段名字）", m.Name)
+	if strings.ContainsAny(name, ".\x00 \t\r\n") {
+		return fmt.Errorf("%s FQN %q 含非法字符（单段命名空间：不含点/空白/控制字符）", kind, name)
+	}
+	return nil
+}
+
+func (c *compiler) compileMetric(m metricDef) error {
+	if err := validateSimpleName("指标", m.Name); err != nil {
+		return err
 	}
 	if err := c.checkMetricSQL(m); err != nil {
 		return err
@@ -206,11 +222,8 @@ func (c *compiler) checkMetricSQL(m metricDef) error {
 }
 
 func (c *compiler) compileConcept(cpt conceptDef) error {
-	if cpt.Name == "" {
-		return fmt.Errorf("概念缺 name 字段")
-	}
-	if strings.Contains(cpt.Name, ".") {
-		return fmt.Errorf("概念 FQN %q 含点（概念是独立命名空间，用单段名字）", cpt.Name)
+	if err := validateSimpleName("概念", cpt.Name); err != nil {
+		return err
 	}
 	if err := c.addEntity(Entity{
 		FQN: cpt.Name, Kind: KindConcept, Name: cpt.Name, Description: cpt.Description,
@@ -228,14 +241,14 @@ func (c *compiler) compileConcept(cpt conceptDef) error {
 
 // requireDescribes 校验概念描述的目标：表/列/指标 均可（describes 边语义）。
 func (c *compiler) requireDescribes(concept, target string) error {
-	kind, ok := c.kinds[target]
+	e, ok := c.entities[target]
 	if !ok {
 		return fmt.Errorf("%w: 概念 %q 描述 %q 不存在", ErrRefMissing, concept, target)
 	}
-	switch kind {
+	switch e.Kind {
 	case KindTable, KindColumn, KindMetric:
 		return nil
 	default:
-		return fmt.Errorf("概念 %q 描述 %q：类型是 %s，需要 table/column/metric", concept, target, kind)
+		return fmt.Errorf("概念 %q 描述 %q：类型是 %s，需要 table/column/metric", concept, target, e.Kind)
 	}
 }

@@ -165,9 +165,17 @@ CREATE TABLE IF NOT EXISTS dgw_sem_enum_values (
 
 -- 实体向量（search_entities 向量兜底；07 只写入，08 票接 sqlite-vec/暴力余弦）。
 -- vector = float32 小端序列（1536 维 × 4 字节）。
+--
+-- 决策记录（07 票，ADR-0005 的落地偏差）：ADR-0005 选定 sqlite-vec vec0
+-- 虚拟表做 KNN，但 modernc.org/sqlite v1.42.2 不含内置 vec（v1.47.0+ 才有）；
+-- 07 只承担「写入向量」，检索在 08 票，故先用普通表 BLOB 落库。BLOB 的
+-- float32 小端序列与 sqlite-vec 内部格式字节兼容——08 票升级驱动后迁移 =
+-- INSERT INTO vec0 SELECT（或直接暴力余弦），无需重嵌入。不升级到 v1.50 的
+-- 原因：依赖大跳版本（libc 等间接依赖）、02-05 票回归面未知，且 07 无
+-- 检索消费方。此偏差不修改 ADR-0005 正文（08 票按 ADR 落地时执行迁移）。
 CREATE TABLE IF NOT EXISTS dgw_sem_embeddings (
     entity_fqn TEXT PRIMARY KEY,
-    model      TEXT NOT NULL,              -- 如 text-embedding-3
+    model      TEXT NOT NULL,              -- 如 text-embedding-3-small
     vector     BLOB NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
