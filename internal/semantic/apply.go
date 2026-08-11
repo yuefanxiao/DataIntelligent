@@ -53,13 +53,7 @@ func applyInTx(ctx context.Context, tx *sql.Tx, d *Diff) (*ApplyStats, error) {
 
 	// 1) 实体 upsert：diff 的新增 + 更新（含墓碑复活：目标里重新出现 = 恢复，
 	//    墓碑实体不在快照 cur 里，故必然落在 EntitiesAdded）。
-	for _, e := range d.EntitiesAdded {
-		if err := upsertEntity(ctx, tx, e); err != nil {
-			return nil, err
-		}
-		s.EntitiesUpserted++
-	}
-	for _, e := range d.EntitiesUpdated {
+	for _, e := range append(append([]Entity{}, d.EntitiesAdded...), d.EntitiesUpdated...) {
 		if err := upsertEntity(ctx, tx, e); err != nil {
 			return nil, err
 		}
@@ -78,13 +72,7 @@ func applyInTx(ctx context.Context, tx *sql.Tx, d *Diff) (*ApplyStats, error) {
 	}
 
 	// 3) 关系边 upsert（新增 + meta 变化）。
-	for _, r := range d.RelationsAdded {
-		if err := upsertRelation(ctx, tx, r); err != nil {
-			return nil, err
-		}
-		s.RelationsUpserted++
-	}
-	for _, r := range d.RelationsUpdated {
+	for _, r := range append(append([]Relation{}, d.RelationsAdded...), d.RelationsUpdated...) {
 		if err := upsertRelation(ctx, tx, r); err != nil {
 			return nil, err
 		}

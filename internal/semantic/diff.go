@@ -2,16 +2,13 @@ package semantic
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 )
 
 // Snapshot 读取运行时（SQLite）当前语义状态，供 diff 对比。
 // 只查 dgw_sem_* 表，不读 YAML（ADR-0002「运行时只查运行时存储」）。
-func Snapshot(ctx context.Context, st interface {
-	DB() *sql.DB
-}) (*Target, error) {
+func Snapshot(ctx context.Context, st DBer) (*Target, error) {
 	s := &snapshotter{st: st}
 	return s.snapshot(ctx)
 }

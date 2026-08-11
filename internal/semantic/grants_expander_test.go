@@ -242,8 +242,8 @@ func TestEmbeddingDegradeNotBlock(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	n, err := EmbedEntityTexts(ctx, st, target, failing, "text-embedding-3", nil)
-	if err != nil {
-		t.Fatalf("embedding 失败不应返回错误（降级）: %v", err)
+	if err == nil {
+		t.Error("失败 embedder 应返回错误（调用方据此记录降级提示）")
 	}
 	if n != 0 {
 		t.Errorf("失败 embedder 应降级为 0 写入, got %d", n)

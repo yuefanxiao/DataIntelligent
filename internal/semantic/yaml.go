@@ -96,9 +96,18 @@ type conceptDef struct {
 }
 
 // Load 读取作者入口目录并返回解析后的原始定义（未编译）。
-// 目录缺 services/、metrics.yaml、concepts.yaml 不报错（空语义层合法）；
-// 文件存在但解析失败 = 编译错误（原子拒绝）。
+// 目录本身不存在 = 错误（原子拒绝，零写库）——sync.go 的「作者入口缺失 →
+// 错误返回」契约；防 `--dir` 路径笔误把整个运行时语义层全量墓碑化
+// （对抗评审修复：空目录被当作合法空语义层 = 一次命令销毁全部语义数据）。
+// 目录存在但缺 services/、metrics.yaml、concepts.yaml 不报错（空语义层合法，
+// 显式清空意图）；文件存在但解析失败 = 编译错误（原子拒绝）。
 func Load(dir string) (*rawInput, error) {
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("语义作者入口目录 %s 不存在（原子拒绝，不写库；--dir 指向语义仓库目录）", dir)
+		}
+		return nil, fmt.Errorf("读取语义作者入口目录 %s: %w", dir, err)
+	}
 	in := &rawInput{}
 	if err := loadServices(filepath.Join(dir, "services"), in); err != nil {
 		return nil, err

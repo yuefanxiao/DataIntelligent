@@ -161,7 +161,7 @@ func Sync(ctx context.Context, st *store.Store, f File, expand Expander) (SyncRe
 		return SyncResult{}, fmt.Errorf("clear grant patterns: %w", err)
 	}
 	for _, k := range sortTargets(targets) {
-		user, fqn := splitKey(k)
+		user, fqn := SplitExpandKey(k)
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO dgw_table_grants (user_id, table_fqn) VALUES (?, ?)`,
 			user, fqn); err != nil {
@@ -169,7 +169,7 @@ func Sync(ctx context.Context, st *store.Store, f File, expand Expander) (SyncRe
 		}
 	}
 	for _, k := range sortTargets(patterns) {
-		user, p := splitKey(k)
+		user, p := SplitExpandKey(k)
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO dgw_grant_patterns (user_id, pattern) VALUES (?, ?)`,
 			user, p); err != nil {
@@ -190,8 +190,10 @@ func Sync(ctx context.Context, st *store.Store, f File, expand Expander) (SyncRe
 	return res, nil
 }
 
-// splitKey 拆开 user\x00fqn 复合键（与 expandKey 互逆）。
-func splitKey(k string) (user, rest string) {
+// SplitExpandKey 拆开 user\x00fqn 复合键（与 expandKey 互逆）。
+// 导出供 cmd/dgw 复用（通配声明告警的 user×pattern 解析）——避免
+// 跨包重复实现同一复合键协议（对抗评审简化修复）。
+func SplitExpandKey(k string) (user, rest string) {
 	for i := 0; i < len(k); i++ {
 		if k[i] == 0 {
 			return k[:i], k[i+1:]

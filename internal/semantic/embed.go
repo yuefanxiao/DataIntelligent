@@ -182,7 +182,8 @@ func decodeFloats(b []byte) ([]float32, error) {
 // 的）实体生成文本 → 调 Embedder 生成向量 → 写入。调用方传「变更实体」
 // （diff 的 Added + Updated）即满足 ADR-0002「增量只嵌入变更实体」。失败
 // 降级：embedding 出错只记日志不阻断同步（验收「失败降级不阻塞同步」）。
-// 返回实际写入的实体数。
+// 返回实际写入的实体数。失败返回错误（调用方记录降级提示，不阻塞同步——
+// 「失败降级不阻塞」的契约在调用方侧兑现）。
 func EmbedEntityTexts(ctx context.Context, st DBer, target *Target, emb Embedder, model string, logf func(format string, args ...any)) (int, error) {
 	if emb == nil {
 		return 0, nil // 未配置 embedding（无 API key）= 跳过，不阻塞
@@ -201,15 +202,37 @@ func EmbedEntityTexts(ctx context.Context, st DBer, target *Target, emb Embedder
 		if logf != nil {
 			logf("embedding 生成失败（降级：不阻塞同步）: %v", err)
 		}
-		return 0, nil
+		return 0, fmt.Errorf("embedding 生成失败: %w", err)
 	}
 	if err := SaveEmbeddings(ctx, st, model, fqns, vecs); err != nil {
 		if logf != nil {
 			logf("embedding 写入失败（降级：不阻塞同步）: %v", err)
 		}
-		return 0, nil
+		return 0, fmt.Errorf("embedding 写入失败: %w", err)
 	}
 	return len(fqns), nil
+}
+
+// EmbeddingCoverage 报告向量库覆盖情况（cmdSemanticSync 决定全量回填 vs
+// 增量嵌入的依据，对抗评审修复「模型切换 → 混合维度」与「API key 后配 →
+// 永久部分覆盖」）：
+//   - missing = 无向量的活跃实体数（首启/历史失败留空）；
+//   - mismatch = 模型与当前不一致的向量数（DGW_EMBEDDING_MODEL 变更残留）。
+func EmbeddingCoverage(ctx context.Context, st DBer, model string) (missing, mismatch int, err error) {
+	if err := st.DB().QueryRowContext(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM dgw_sem_entities WHERE tombstone = 0) -
+		  (SELECT COUNT(*) FROM dgw_sem_embeddings)`).Scan(&missing); err != nil {
+		return 0, 0, fmt.Errorf("count embedding coverage: %w", err)
+	}
+	if missing < 0 {
+		missing = 0 // 残留向量多于实体（清理滞后）：不算缺失
+	}
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dgw_sem_embeddings WHERE model != ?`, model).Scan(&mismatch); err != nil {
+		return 0, 0, fmt.Errorf("count embedding model mismatch: %w", err)
+	}
+	return missing, mismatch, nil
 }
 
 // RemoveEmbeddings 删除实体的向量（墓碑对应面：实体被墓碑化后其向量一并
