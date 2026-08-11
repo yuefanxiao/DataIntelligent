@@ -1,7 +1,7 @@
 # v1 build 03 — 校验层：AST 分类 + 表提取 + 授权比对
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/20
-Status: assigned（yuefanxiao，2026-08-12 领取；实现 + 单测完成，PR 合入后关闭）
+Status: closed（2026-08-12，PR #33 合入 main；验收六条全过 + 双轴 code review 已修复）
 Blocked by (open blockers): 0
 
 ## 来源
