@@ -21,7 +21,7 @@
 3. **权限**：双表面——业务数据面默认拒绝、表级 FQN 白名单授权（指标/概念授权编译期展开为表授权）；语义元数据面认证即读。凭据 = opaque 随机串（`dgw_` 前缀、sha256 哈希存储、明文仅创建时打印一次），key→用户扁平 grants，一用户多 key、吊销即时；grants YAML + CLI 维护，编译进 SQLite 权限表，网关启动加载内存 + 热重载。
 4. **执行记录**：六工具全记 + 认证失败/权限拒绝 + key 生命周期 = 结构化 JSONL（宿主机文件 + 轮转），字段契约含 SQL 原文（不脱敏，宿主机权限即访问边界）、分阶段耗时、状态、行数、truncated、plan_id、被拒原因；原始 ~7 天 + 聚合摘要 ~30 天。
 
-**部署**：内部开发机单机 Docker（三 volume：SQLite/执行记录/env 0600），数据库凭证只存该机 env 文件；启动自检两条硬校验（`pg_is_in_recovery()` + 角色级 statement_timeout 生效确认，不过拒启）；DSN 可配置 + 按 dbname 路由（生产网络通路生产部署时定）。
+**部署**：内部开发机单机 Docker（三 volume：SQLite/执行记录/env 0600），数据库凭证只存该机 env 文件；启动自检三条硬校验（`pg_is_in_recovery()` + 角色级 statement_timeout 生效确认 + `current_database()` 与路由 dbname 一致，不过拒启）；DSN 可配置 + 按 dbname 路由（生产网络通路生产部署时定）。
 
 **负载防护数值**（见 §4.9 参数表）：每 key 并发 2 / 进程级 8 / statement_timeout 30s（可配）/ SQL 限额 500-5000。
 
@@ -143,7 +143,7 @@
 - **凭证边界**：数据库凭证只存在该机 env 文件，开发机/CI 零凭证；网关/采集器只用专用共享只读角色，永不超管。
 - **传输**：**双传输**——Streamable HTTP 为主（守护进程形态，go-sdk `RequireBearerToken` + 自实现 `TokenVerifier`），stdio 为调试形态（env 传 key）；官方 go-sdk v1.7.0+（双协议时代自动协商：2025-11-25 存量客户端走 legacy 握手、2026-07-28 客户端走无状态，DNS rebinding 防护、session hijack 防护开箱即用）。
 - **从库连接**：可配置 DSN 口子（host/port/用户/密码）+ 按 dbname 路由（Database 实体 = PG database）；生产网络通路方案（NodePort/port-forward/LB）生产部署时定，v1 不锁。
-- **启动自检**（不过拒启）：`pg_is_in_recovery() = true`（防连错主库）+ 角色级 statement_timeout 生效确认。
+- **启动自检**（不过拒启）：`pg_is_in_recovery() = true`（防连错主库）+ 角色级 statement_timeout 生效确认 + `current_database()` 与路由 dbname 一致（DSN 指错库拒启）。
 - **数据新鲜度**：接受从库异步复制延迟（秒级，v1 消费场景无感）；延迟监测后置。
 - **监控/告警、正式上线/回滚流程**：v1 不做；观测面 = 执行记录 + docker restart 兜底；回滚基线 = 旧镜像 tag + SQLite 文件备份恢复。
 

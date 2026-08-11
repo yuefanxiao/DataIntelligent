@@ -19,7 +19,7 @@ go build ./cmd/dgw
 # 1. 创建凭据（明文仅打印一次，哈希落库）
 dgw key-create --user dev-alice
 
-# 2a. Streamable HTTP 守护进程（bearer 认证）
+# 2a. Streamable HTTP 守护进程（bearer 认证；启动自检不过 = 拒启）
 dgw serve
 
 # 2b. stdio 调试形态（env 传 key）
@@ -27,6 +27,25 @@ DGW_API_KEY=<上面打印的 key> dgw serve-stdio
 ```
 
 配置面 = env（`DGW_DB_PATH` / `DGW_HTTP_ADDR` / `DGW_API_KEY`），flag 可覆盖。
+
+## 部署（ADR-0009）
+
+内部开发机单机 Docker（compose 单服务、三挂载 /data /logs /config 0600、
+`restart: unless-stopped`、凭证只在宿主机 env 文件）；启动自检三条硬校验
+（`pg_is_in_recovery() = true` + 角色级 statement_timeout 生效，不过拒启）。
+
+```sh
+# 1. provisioning 共享只读角色（CNPG 超管跑 readonly-role.sql）
+# 2. 初始化语义仓库（Gitea clone 打通）
+./deploy/semantic-repo/bootstrap.sh <gitea-repo-url>
+# 3. 配置凭证 env（0600，不入 git）
+cp deploy/config/env.example deploy/config/env && chmod 600 deploy/config/env
+# 4. 起网关
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+部署 runbook：`deploy/README.md`；本地全量验证（主从流复制 + MCP 查询 +
+拒启演示）：`deploy/demo/README.md`。
 
 ## 采集器（`dgw-collect`）
 

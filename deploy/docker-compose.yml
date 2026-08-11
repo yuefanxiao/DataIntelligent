@@ -1,0 +1,53 @@
+# 网关部署（ADR-0009：内部开发机单机 Docker；compose 单服务；三挂载：
+# SQLite /data、执行记录 /logs、凭证 env /config 0600；restart
+# unless-stopped；不进生产集群）。
+#
+# 使用（详见 deploy/README.md）：
+#   1. 先按 deploy/provisioning/ 建共享只读角色（开发自建，超管一次性）
+#   2. cp deploy/config/env.example deploy/config/env && chmod 600（填凭证）
+#   3. docker compose -f deploy/docker-compose.yml up -d --build
+#
+# 凭证边界：DGW_PG_DATABASES（DSN 即数据库凭证）只在 config/env 里；
+# 开发机/CI 零凭证；config/env 不提交 git（.gitignore）。
+#
+# 镜像 tag = 版本化（回滚基线 = 旧镜像 tag + SQLite 备份文件恢复，
+# ADR-0009）：DGW_IMAGE_TAG=dgw:v1-build-10 docker compose up -d 可覆盖。
+services:
+  dgw:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # 基础镜像 registry 覆盖（网络受限环境）：DGW_BASE_REGISTRY=docker.1ms.run/library
+      args:
+        BASE_REGISTRY: ${DGW_BASE_REGISTRY:-docker.io/library}
+    image: ${DGW_IMAGE_TAG:-dgw:v1-build-10}
+    restart: unless-stopped
+    ports:
+      # 默认只绑回环（内部开发机形态，网关持有 DB 凭证）；对外暴露改
+      # DGW_HTTP_PORT=0.0.0.0:8080。
+      - "${DGW_HTTP_PORT:-127.0.0.1:8080}:8080"
+    # 容器内经 host.docker.internal 访问宿主（demo DSN 目标；Linux 原生
+    # Docker 需 host-gateway 显式映射，macOS/OrbStack 亦兼容）。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # healthcheck = 自检 + HTTP 应答的外部信号：未认证请求被中间件回 401
+    # 即服务活着（自检不过的崩溃循环 → 无应答 → unhealthy；compose ps
+    # 可见，弥补 restart unless-stopped 无失败信号）。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --server-response -O /dev/null http://127.0.0.1:8080/ 2>&1 | grep -q '401' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    env_file:
+      - ./config/env
+    volumes:
+      - dgw-data:/data       # SQLite 运行时存储（DGW_DB_PATH=/data/dgw.db）
+      - dgw-logs:/logs       # 执行记录 JSONL（DGW_EXEC_LOG_DIR=/logs）
+      - ./config:/config:ro  # 凭证 env 文件副本（宿主机 0600，容器内只读可见；
+                             # 进程实际环境以 env_file 注入为准——改文件后
+                             # 需 recreate 才生效）
+    command: ["serve"]
+
+volumes:
+  dgw-data:
+  dgw-logs:

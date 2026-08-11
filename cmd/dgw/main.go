@@ -68,6 +68,8 @@ func main() {
 		cmdSemanticSync()
 	case "semantic-backup":
 		cmdSemanticBackup()
+	case "selfcheck":
+		cmdSelfCheck()
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -91,6 +93,7 @@ func usage() {
   dgw grants-snapshot [--db PATH]           查看授权快照（key + 表授权）
   dgw semantic-sync --dir DIR [--db PATH] [--dry-run]   语义同步管线：编译 → dry-run diff → 应用
   dgw semantic-backup --out PATH [--db PATH] 运行时存储备份（WAL checkpoint + 文件拷贝）
+  dgw selfcheck       启动自检：逐 dbname 三条硬校验（pg_is_in_recovery + 角色级 statement_timeout + current_database），不过拒启
 
 权限 CLI 仅限网关宿主机运行（能上宿主机 = 运维者，v1 无管理员角色）；
 grants YAML 是表授权的事实源（git review 即权限变更评审闸门），
@@ -140,7 +143,8 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 }
 
 // gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸 +
-// 执行记录 + search_entities 向量通道）。
+// 执行记录 + search_entities 向量通道），并返回 router（nil = 未配置 PG
+// 路由）与 cleanup。
 // 并发闸恒注入：即使未配置 PG 路由，env 数值也经 WithLoadGate 校验
 // （越界配置同样启动失败，不会静默退化为默认 2/8）。执行记录恒注入：
 // 目录不可写 = 启动失败（execLog fail fast），不存在「带病不记录」形态。
@@ -148,9 +152,9 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 // embedder（RRF 向量兜底）；缺省纯关键词检索（向量是兜底通道，不配置
 // 不降级报错）。
 // cleanup 关闭执行记录器与 PG 路由（路由未配置时只关记录器）。
-func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
+func gatewayOpts(cfg config.Config) (opts []gateway.Option, router *db.Router, cleanup func(), err error) {
 	lg := execLog(cfg)
-	opts := []gateway.Option{
+	opts = []gateway.Option{
 		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
 		gateway.WithExecLog(lg),
 	}
@@ -161,16 +165,32 @@ func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 		}
 		opts = append(opts, gateway.WithSearchEmbed(semantic.NewOpenAIEmbedder(key, model)))
 	}
-	router, err := buildRouter(cfg)
+	router, err = buildRouter(cfg)
 	if err != nil {
 		_ = lg.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if router == nil {
-		return opts, func() { _ = lg.Close() }, nil
+		return opts, nil, func() { _ = lg.Close() }, nil
 	}
 	opts = append(opts, gateway.WithExecuteSQL(router, cfg.SQLLimit))
-	return opts, func() { router.Close(); _ = lg.Close() }, nil
+	return opts, router, func() { router.Close(); _ = lg.Close() }, nil
+}
+
+// runStartupSelfCheck 是启动自检接线（ADR-0009，不过拒启）：serve /
+// serve-stdio 在网关服务前对全部 dbname 路由跑三条硬校验，失败 = 进程
+// 退出（拒启）。router 为 nil（未配置 DGW_PG_DATABASES）时无可自检对象，
+// 跳过——execute_sql 未配置，网关只服务语义工具（结构化「未配置」拒绝）。
+func runStartupSelfCheck(cfg config.Config, router *db.Router) {
+	if router == nil {
+		log.Printf("未配置 DGW_PG_DATABASES，跳过启动自检（execute_sql 未配置，网关只服务语义工具）")
+		return
+	}
+	if err := router.SelfCheck(context.Background(), time.Duration(cfg.PGTimeoutMS)*time.Millisecond); err != nil {
+		log.Fatalf("启动自检失败（拒启）: %v", err)
+	}
+	log.Printf("启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效 + current_database 与路由一致",
+		len(router.DBNames()))
 }
 
 // execLog 打开执行记录写入器（06 票；spec §4.9 参数表：原始 7 天轮转 +
@@ -217,11 +237,12 @@ func cmdServe() {
 
 	st := openStore(*dbPath)
 	defer st.Close()
-	opts, closeRouter, err := gatewayOpts(cfg)
+	opts, router, closeRouter, err := gatewayOpts(cfg)
 	if err != nil {
 		log.Fatalf("execute_sql 路由配置错误: %v", err)
 	}
 	defer closeRouter()
+	runStartupSelfCheck(cfg, router)
 	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)), opts...)
 	if err != nil {
 		log.Fatalf("网关启动失败（权限快照加载失败）: %v", err)
@@ -244,11 +265,12 @@ func cmdServeStdio() {
 	apiKey := cfg.APIKey
 	st := openStore(*dbPath)
 	defer st.Close()
-	opts, closeRouter, err := gatewayOpts(cfg)
+	opts, router, closeRouter, err := gatewayOpts(cfg)
 	if err != nil {
 		log.Fatalf("execute_sql 路由配置错误: %v", err)
 	}
 	defer closeRouter()
+	runStartupSelfCheck(cfg, router)
 	g, err := gateway.New(st, slog.New(slog.NewTextHandler(os.Stderr, nil)), opts...)
 	if err != nil {
 		log.Fatalf("网关启动失败（权限快照加载失败）: %v", err)
@@ -709,4 +731,31 @@ func cmdSemanticBackup() {
 		log.Fatalf("备份失败: %v", err)
 	}
 	fmt.Printf("dgw: 已备份到 %s（WAL checkpoint + 文件拷贝，可直接用于回滚恢复）\n", *out)
+}
+
+// cmdSelfCheck 单独跑启动自检（ADR-0009 三条硬校验，不过拒启）：与
+// serve 启动时同一校验路径，独立子命令供运维排障与失败场景演示
+// （「连错主库 / 角色级超时未生效 → 拒启」不必起网关即可复现）。
+func cmdSelfCheck() {
+	cfg := config.FromEnv()
+	router, err := buildRouter(cfg)
+	if err != nil {
+		log.Fatalf("execute_sql 路由配置错误: %v", err)
+	}
+	if router == nil {
+		fmt.Println("dgw: 未配置 DGW_PG_DATABASES，无可自检路由（跳过）")
+		return
+	}
+	defer router.Close()
+
+	names := router.DBNames()
+	err = router.SelfCheck(context.Background(), time.Duration(cfg.PGTimeoutMS)*time.Millisecond)
+	if err != nil {
+		log.Printf("启动自检失败（拒启）: %v", err)
+		os.Exit(1)
+	}
+	for _, n := range names {
+		fmt.Printf("  校验 %s：通过\n", n)
+	}
+	fmt.Printf("dgw: 启动自检通过：%d 条 dbname 路由全部连到从库（pg_is_in_recovery() = true）+ 角色级 statement_timeout 生效 + current_database 一致\n", len(names))
 }

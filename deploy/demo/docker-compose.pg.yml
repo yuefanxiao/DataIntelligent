@@ -1,0 +1,62 @@
+# demo：主 + 从流复制 PG（本地验证启动自检；非生产拓扑）。
+#
+# 形态：主库正常（wal_level=replica + walsender/槽数）；从库容器启动时
+# pg_basebackup 拉主库全量（-R 写 primary_conninfo + standby.signal）再以
+# hot_standby 启动——与内部开发机接的 CNPG 从库同构（单从简化版）。
+# 从库映射到宿主 127.0.0.1:${DGW_DEMO_REPL_PORT:-55432}（网关 DSN 目标）。
+#
+# 用法：由 setup.sh 编排（provisioning / 网关 / 验收），或单独
+#   docker compose -f docker-compose.pg.yml up -d
+services:
+  pg-primary:
+    image: postgres:17
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust # demo 专用；生产走共享只读角色口令
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    volumes:
+      - pg-primary-data:/var/lib/postgresql/data
+      # 官方镜像 trust 只对普通连接全开；流复制连接需显式追加 pg_hba 行
+      # （initdb.d 脚本在首次启动、服务器起跑前执行，写库文件无需 reload）。
+      - ./initdb.d:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${DGW_DEMO_PRIM_PORT:-55431}:5432"
+    networks: [pgnet]
+
+  pg-replica:
+    image: postgres:17
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command:
+      - bash
+      - -c
+      - >-
+        until pg_isready -h pg-primary -U postgres -q; do sleep 1; done;
+        gosu postgres pg_basebackup -h pg-primary -U postgres -D /var/lib/postgresql/data -R -X stream &&
+        chmod 700 /var/lib/postgresql/data &&
+        exec gosu postgres postgres -c listen_addresses=* -c hot_standby=on
+    ports:
+      - "127.0.0.1:${DGW_DEMO_REPL_PORT:-55432}:5432"
+    networks: [pgnet]
+
+networks:
+  pgnet:
+
+volumes:
+  pg-primary-data:
