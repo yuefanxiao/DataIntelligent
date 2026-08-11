@@ -19,6 +19,7 @@ import (
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
+	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -151,8 +152,15 @@ func requirePG(t *testing.T) {
 	}
 }
 
-// e2eGateway 建一个带 PG 路由的网关（注入 execute_sql）+ 测试身份授权。
+// e2eGateway 建一个带 PG 路由的网关（注入 execute_sql，并发闸取 spec 默认
+// 2/8）+ 测试身份授权。
 func e2eGateway(t *testing.T, entries []db.Entry, limit int, timeout time.Duration, grants_ ...string) (*Gateway, *store.Store) {
+	t.Helper()
+	return e2eGatewayWith(t, entries, limit, timeout, 2, 8, grants_...)
+}
+
+// e2eGatewayWith 是 e2eGateway 的闸数值注入形态（并发闸测试用短配额）。
+func e2eGatewayWith(t *testing.T, entries []db.Entry, limit int, timeout time.Duration, gatePerKey, gateTotal int, grants_ ...string) (*Gateway, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "dgw.db"))
 	if err != nil {
@@ -164,7 +172,7 @@ func e2eGateway(t *testing.T, entries []db.Entry, limit int, timeout time.Durati
 		t.Fatalf("db.NewRouter: %v", err)
 	}
 	t.Cleanup(router.Close)
-	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExecuteSQL(router, limit))
+	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), WithExecuteSQL(router, limit), WithLoadGate(gatePerKey, gateTotal))
 	if err != nil {
 		t.Fatalf("gateway.New: %v", err)
 	}
@@ -413,4 +421,196 @@ func TestExecuteSQLE2ETimeout(t *testing.T) {
 	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "timeout" {
 		t.Fatalf("超时错误 = %s reason=%v details=%v msg=%q，期望 invalid_request/timeout", e.Kind, e.Details["reason"], e.Details, e.Message)
 	}
+}
+
+// 物理边界默认值：连接级 statement_timeout 默认 30s 生效（spec §4.9；
+// 可配路径 = TestExecuteSQLE2ETimeout 的 200ms 注入）。
+func TestExecuteSQLE2EStatementTimeoutDefault(t *testing.T) {
+	requirePG(t)
+	g, st := e2eGateway(t, []db.Entry{{DBName: "bss", Service: "bss", DSN: bssDSN}}, 500, 30*time.Second, "bss.bss.orders")
+	key := createKey(t, st, "dev-alice")
+	ts := httptest.NewServer(g.HTTPHandler())
+	defer ts.Close()
+	session := connectHTTP(t, ts.URL, key)
+	defer session.Close()
+
+	res := callSQL(t, session, map[string]any{"sql": "SELECT current_setting('statement_timeout')", "dbname": "bss"})
+	if len(res.Rows) != 1 {
+		t.Fatalf("结果行数 = %d，期望 1", len(res.Rows))
+	}
+	if got, ok := res.Rows[0][0].(string); !ok || got != "30s" {
+		t.Fatalf("statement_timeout = %v (%T)，期望 \"30s\"（默认 30s 连接级生效）", res.Rows[0][0], res.Rows[0][0])
+	}
+}
+
+// callOutcome 是并发闸 e2e 里 goroutine 调用的结果（不能在 goroutine 里
+// 用 t.Fatalf，结果经 channel 回传主测试）。
+type callOutcome struct {
+	res     *sqlResult
+	e       *gwerr.Error
+	elapsed time.Duration
+}
+
+// holdCall 发一个长查询并占用并发位：CallTool 发出后立刻通知 issued，
+// 完成后把结果送回 out。
+func holdCall(session *mcp.ClientSession, sql string, issued chan<- struct{}, out chan<- callOutcome) {
+	issued <- struct{}{}
+	start := time.Now()
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "execute_sql", Arguments: map[string]any{"sql": sql, "dbname": "bss"},
+	})
+	elapsed := time.Since(start)
+	out <- outcomeOf(res, err, elapsed)
+}
+
+// outcomeOf 把 CallTool 的返回转成 callOutcome（成功/结构化错误统一收口）。
+func outcomeOf(res *mcp.CallToolResult, err error, elapsed time.Duration) callOutcome {
+	if err != nil {
+		return callOutcome{e: &gwerr.Error{Kind: gwerr.KindInternal, Message: err.Error()}, elapsed: elapsed}
+	}
+	if res == nil || res.IsError {
+		if res != nil && len(res.Content) > 0 {
+			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+				var e gwerr.Error
+				if json.Unmarshal([]byte(tc.Text), &e) == nil {
+					return callOutcome{e: &e, elapsed: elapsed}
+				}
+			}
+		}
+		return callOutcome{e: &gwerr.Error{Kind: gwerr.KindInternal, Message: "error result"}, elapsed: elapsed}
+	}
+	var out sqlResult
+	if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+		_ = json.Unmarshal([]byte(tc.Text), &out)
+	}
+	return callOutcome{res: &out, elapsed: elapsed}
+}
+
+// 负向例 4：同 key 并发 >2 → 结构化拒绝（不排队、不影响其他 key）。
+// 每 key 配额 2：两并发在途时第三发快速失败；其他 key 照常放行；
+// 在途结束后配额恢复。
+func TestExecuteSQLE2EConcurrencyGate(t *testing.T) {
+	requirePG(t)
+	g, st := e2eGatewayWith(t, []db.Entry{{DBName: "bss", Service: "bss", DSN: bssDSN}}, 500, 30*time.Second, 2, 8, "bss.bss.orders")
+	keyA := createKey(t, st, "dev-alice")
+	keyB := createKey(t, st, "dev-bob")
+	// bob 也需要表授权（隔离断言用）
+	if err := grants.AddGrant(context.Background(), st, "dev-bob", "bss.bss.orders"); err != nil {
+		t.Fatalf("AddGrant(bob): %v", err)
+	}
+	if err := g.authz.Load(context.Background()); err != nil {
+		t.Fatalf("authz.Load: %v", err)
+	}
+	ts := httptest.NewServer(g.HTTPHandler())
+	defer ts.Close()
+
+	sa1 := connectHTTP(t, ts.URL, keyA)
+	defer sa1.Close()
+	sa2 := connectHTTP(t, ts.URL, keyA)
+	defer sa2.Close()
+	sa3 := connectHTTP(t, ts.URL, keyA)
+	defer sa3.Close()
+	sb := connectHTTP(t, ts.URL, keyB)
+	defer sb.Close()
+
+	// 同 key 两个在途长查询（pg_sleep(3) 留足断言窗口）
+	issued := make(chan struct{}, 2)
+	out := make(chan callOutcome, 2)
+	go holdCall(sa1, "SELECT pg_sleep(3)", issued, out)
+	go holdCall(sa2, "SELECT pg_sleep(3)", issued, out)
+	for i := 0; i < 2; i++ {
+		<-issued
+	}
+	time.Sleep(500 * time.Millisecond) // 等两个查询真正在途（闸位已占用）
+
+	// 第三发（同 key）→ 快速失败：rate_limited/key_concurrency_limit，<1s
+	start := time.Now()
+	e := callSQLErr(t, sa3, map[string]any{"sql": "SELECT pg_sleep(3)", "dbname": "bss"})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("第三发耗时 %v，期望快速失败（不排队）", elapsed)
+	}
+	if e.Kind != gwerr.KindRateLimited || e.Details["reason"] != loadgate.ReasonKeyConcurrency {
+		t.Fatalf("第三发 = %s reason=%v，期望 rate_limited/%s", e.Kind, e.Details["reason"], loadgate.ReasonKeyConcurrency)
+	}
+	// 经 JSON 解码的数值是 float64（闸内是 int，契约以值比较）
+	if e.Details["key"] != "dev-alice" || e.Details["limit"] != float64(2) {
+		t.Errorf("details = %v，期望 key=dev-alice limit=2", e.Details)
+	}
+
+	// 其他 key 不受影响（key 隔离）：bob 照常查询成功
+	resB := callSQL(t, sb, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
+	if len(resB.Rows) != 1 {
+		t.Fatalf("bob 查询应成功: %+v", resB)
+	}
+
+	// 两个在途查询正常完成（闸位不误伤在途请求）
+	for i := 0; i < 2; i++ {
+		oc := <-out
+		if oc.e != nil {
+			t.Fatalf("在途查询应成功，得到错误: %v", oc.e)
+		}
+	}
+
+	// 在途结束 → 配额恢复：同 key 再查成功
+	callSQL(t, sa3, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
+}
+
+// 负向例 4：进程级并发 >8 → 结构化拒绝（守护进程语义，跨 key 共享总闸）。
+// perKey=2, total=2：两个不同 key 各占 1 → 进程级满，第三 key 被拒
+// （其每 key 配额未满，证明是进程级闸触发）。
+func TestExecuteSQLE2EProcessGate(t *testing.T) {
+	requirePG(t)
+	g, st := e2eGatewayWith(t, []db.Entry{{DBName: "bss", Service: "bss", DSN: bssDSN}}, 500, 30*time.Second, 2, 2, "bss.bss.orders")
+	keyA := createKey(t, st, "dev-alice")
+	keyB := createKey(t, st, "dev-bob")
+	keyC := createKey(t, st, "dev-carol")
+	for _, u := range []string{"dev-bob", "dev-carol"} {
+		if err := grants.AddGrant(context.Background(), st, u, "bss.bss.orders"); err != nil {
+			t.Fatalf("AddGrant(%s): %v", u, err)
+		}
+	}
+	if err := g.authz.Load(context.Background()); err != nil {
+		t.Fatalf("authz.Load: %v", err)
+	}
+	ts := httptest.NewServer(g.HTTPHandler())
+	defer ts.Close()
+
+	sa := connectHTTP(t, ts.URL, keyA)
+	defer sa.Close()
+	sb := connectHTTP(t, ts.URL, keyB)
+	defer sb.Close()
+	sc := connectHTTP(t, ts.URL, keyC)
+	defer sc.Close()
+
+	issued := make(chan struct{}, 2)
+	out := make(chan callOutcome, 2)
+	go holdCall(sa, "SELECT pg_sleep(3)", issued, out)
+	go holdCall(sb, "SELECT pg_sleep(3)", issued, out)
+	for i := 0; i < 2; i++ {
+		<-issued
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 第三 key（每 key 配额未满）→ 进程级闸拒绝，快速失败
+	start := time.Now()
+	e := callSQLErr(t, sc, map[string]any{"sql": "SELECT pg_sleep(3)", "dbname": "bss"})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("第三发耗时 %v，期望快速失败（不排队）", elapsed)
+	}
+	if e.Kind != gwerr.KindRateLimited || e.Details["reason"] != loadgate.ReasonProcessConcurrency {
+		t.Fatalf("第三发 = %s reason=%v，期望 rate_limited/%s", e.Kind, e.Details["reason"], loadgate.ReasonProcessConcurrency)
+	}
+	if e.Details["limit"] != float64(2) {
+		t.Errorf("details = %v，期望 limit=2", e.Details)
+	}
+
+	// 在途查询正常完成
+	for i := 0; i < 2; i++ {
+		if oc := <-out; oc.e != nil {
+			t.Fatalf("在途查询应成功，得到错误: %v", oc.e)
+		}
+	}
+
+	// 进程级配额恢复：carol 再查成功
+	callSQL(t, sc, map[string]any{"sql": "SELECT count(*) FROM orders", "dbname": "bss"})
 }

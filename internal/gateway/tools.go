@@ -104,7 +104,7 @@ func registerTools(s *mcp.Server, g *Gateway) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "execute_sql",
-		Description: "执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。",
+		Description: "执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。并发闸：每 key 2 / 进程级 8 同时查询，超限 rate_limited 快速拒绝（不排队）。",
 		Annotations: readOnly(),
 	}, g.handleExecuteSQL)
 }

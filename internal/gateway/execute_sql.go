@@ -34,6 +34,7 @@ var pgTypeMap = pgtype.NewMap()
 //
 // 任何一段失败 = 结构化错误回传（gwerr），网关不重试、无自愈循环。
 // 执行记录（06 票）在此挂接点之前/之后插入，不改本函数签名。
+// 负载防护（05 票并发闸）挂在链首：饱和时连路由/校验都不做，直接拒绝。
 func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest, in executeSQLInput) (*mcp.CallToolResult, *sqlResult, error) {
 	if g.execSQL == nil {
 		return errResult(gwerr.InvalidRequest(
@@ -47,6 +48,22 @@ func (g *Gateway) handleExecuteSQL(ctx context.Context, req *mcp.CallToolRequest
 			map[string]any{"reason": "empty"},
 		)), nil, nil
 	}
+
+	// ── 闸：并发闸（负载防护，05 票）─────────────────────────────────────
+	// 每 key 并发 2 + 进程级总并发 8 双信号量（spec §4.9）：超限结构化拒绝
+	// （rate_limited，不排队、快速失败，§6.3 负向例 4）。闸在路由/校验之前
+	// ——饱和时连校验 CPU 都不花。key = 绑定身份（UserFromContext）；stdio
+	// 形态单 key 单进程，天然退化为每进程闸。占用位持有到本调用结束
+	// （defer Release）；进程级闸全 key 共享（守护进程语义）。
+	keyID, _ := UserFromContext(ctx)
+	if keyID == "" {
+		keyID = "unknown" // 防御：正常路径（HTTP 已认证 / stdio 已预置）不可达
+	}
+	if e := g.loadGate.TryAcquire(keyID); e != nil {
+		return errResult(e), nil, nil
+	}
+	defer g.loadGate.Release(keyID)
+
 	start := time.Now()
 
 	// ── 段 0：dbname 路由（目标库 + 服务归属）──────────────────────────────

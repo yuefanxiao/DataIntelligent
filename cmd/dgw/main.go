@@ -94,6 +94,8 @@ env（flag 优先）：
   DGW_PG_DATABASES  execute_sql 路由表（JSON 数组 [{"dbname","service","dsn"}]；DSN 即数据库凭证）
   DGW_SQL_LIMIT    execute_sql 行数上限（默认 500，范围 500-5000）
   DGW_PG_STATEMENT_TIMEOUT_MS  statement_timeout 毫秒（默认 30000）
+  DGW_KEY_CONCURRENCY     每 key 并发查询上限（默认 2，超限结构化拒绝不排队）
+  DGW_PROCESS_CONCURRENCY 进程级总并发上限（默认 8，守护进程语义；stdio 退化为每进程闸）
 `)
 }
 
@@ -123,7 +125,7 @@ func buildRouter(cfg config.Config) (*db.Router, error) {
 	return db.NewRouter(context.Background(), entries, time.Duration(cfg.PGTimeoutMS)*time.Millisecond)
 }
 
-// gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额）。
+// gatewayOpts 组装 New 的可选注入（execute_sql 路由 + 限额 + 并发闸）。
 func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 	router, err := buildRouter(cfg)
 	if err != nil {
@@ -132,7 +134,11 @@ func gatewayOpts(cfg config.Config) ([]gateway.Option, func(), error) {
 	if router == nil {
 		return nil, func() {}, nil
 	}
-	return []gateway.Option{gateway.WithExecuteSQL(router, cfg.SQLLimit)}, router.Close, nil
+	opts := []gateway.Option{
+		gateway.WithExecuteSQL(router, cfg.SQLLimit),
+		gateway.WithLoadGate(cfg.KeyConcurrency, cfg.ProcessConcurrency),
+	}
+	return opts, router.Close, nil
 }
 
 func cmdServe() {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/yuefanxiao/DataIntelligent/internal/authz"
 	"github.com/yuefanxiao/DataIntelligent/internal/db"
+	"github.com/yuefanxiao/DataIntelligent/internal/loadgate"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -31,17 +32,20 @@ const authzReloadInterval = 5 * time.Second
 
 // Gateway 是一个网关实例：持有运行时存储、授权服务与 MCP server。
 type Gateway struct {
-	store   *store.Store
-	authz   *authz.Service
-	server  *mcp.Server
-	execSQL *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	store    *store.Store
+	authz    *authz.Service
+	server   *mcp.Server
+	execSQL  *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
+	loadGate *loadgate.Gate  // 并发闸（负载防护，05 票；默认 2/8，WithLoadGate 可配）
 }
 
-// Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04 票接线）。
+// Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04/05 票接线）。
 type Option func(*options)
 
 type options struct {
 	execSQL *executeSQLDeps
+	load    *loadgate.Gate
+	loadErr error // WithLoadGate 数值非法时的配置错误（New 上报，fail fast）
 }
 
 // executeSQLDeps 是 execute_sql 的运行时依赖：PG 路由 + 行数限额。
@@ -56,6 +60,14 @@ const (
 	sqlLimitMax     = 5000
 )
 
+// 并发闸默认值（spec §4.9 参数表：每 key 2 / 进程级 8；env 可覆盖——
+// 与 config 包同源默认）。网关恒启用并发闸（负载防护不缺席），
+// WithLoadGate 只调数值。
+const (
+	keyConcurrencyDefault     = 2
+	processConcurrencyDefault = 8
+)
+
 // WithExecuteSQL 注入 execute_sql 的 PG 路由与行数限额（spec §4.9「env 可
 // 覆盖」：默认 500，硬上限 5000 不可配置超过）。未调用时 execute_sql 返回
 // 结构化「未配置」错误（fail closed，不静默降级）。
@@ -65,9 +77,23 @@ func WithExecuteSQL(router *db.Router, limit int) Option {
 	}
 }
 
+// WithLoadGate 调并发闸数值（spec §4.9「env 可覆盖」：每 key 并发上限 /
+// 进程级总并发上限；默认 2/8）。非法值（<1 或进程级 < 每 key）= 启动失败
+// （配置错误 fail fast）。未调用时取 spec 默认 2/8。
+func WithLoadGate(perKey, total int) Option {
+	return func(o *options) {
+		gate, err := loadgate.New(perKey, total)
+		if err != nil {
+			o.loadErr = err
+			return
+		}
+		o.load = gate
+	}
+}
+
 // New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
 // 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
-// 限额越界（<500 或 >5000）= 启动失败（配置错误 fail fast）。
+// 限额越界（<500 或 >5000）/ 并发闸数值非法 = 启动失败（配置错误 fail fast）。
 func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
@@ -83,6 +109,17 @@ func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error)
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.loadErr != nil {
+		return nil, o.loadErr
+	}
+	if o.load == nil {
+		gate, err := loadgate.New(keyConcurrencyDefault, processConcurrencyDefault)
+		if err != nil {
+			return nil, err // 常量默认值，不可达；防御
+		}
+		o.load = gate
+	}
+	g.loadGate = o.load
 	g.execSQL = o.execSQL
 	if g.execSQL != nil && g.execSQL.router == nil {
 		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
