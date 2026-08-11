@@ -311,8 +311,6 @@ func removeIfExists(path string) error {
 	}
 	return nil
 }
-	return nil
-}
 
 // summarize 把某日原始文件聚合成摘要（幂等：摘要已存在则跳过）。摘要内容
 // （喂知识采集信号，ADR-0006）：
