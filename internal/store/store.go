@@ -12,6 +12,8 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 
 	_ "modernc.org/sqlite"     // 驱动名 "sqlite"，纯 Go 实现
 	_ "modernc.org/sqlite/vec" // sqlite-vec（08 票，ADR-0005）：init 里 auto-extension 注册 vec0 虚拟表，进程内对所有新连接生效
@@ -221,20 +223,44 @@ CREATE TABLE IF NOT EXISTS dgw_grant_patterns (
 	// vec0 索引——幂等回填（维度匹配的行补齐进索引，跳过已存在的），后续
 	// 由 SaveEmbeddings 双写维护。维度过滤防模型切换残留的异维向量进 KNN
 	// （混合维度余弦 = 垃圾检索结果，与 EmbeddingCoverage 同一动机）。
+	// 维度取 vec0 表当前声明值（非默认常量——非 1536 维模型下回填同样正确）。
+	dim, err := s.vec0DimOf(ctx)
+	if err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO dgw_sem_vec (entity_fqn, vector)
 SELECT entity_fqn, vector FROM dgw_sem_embeddings
 WHERE length(vector) = ? AND NOT EXISTS (
     SELECT 1 FROM dgw_sem_vec v WHERE v.entity_fqn = dgw_sem_embeddings.entity_fqn)`,
-		vec0Dim*4); err != nil {
+		dim*4); err != nil {
 		return fmt.Errorf("migrate embeddings to vec0: %w", err)
 	}
 	return nil
 }
 
-// vec0Dim 是 vec0 索引表的初始向量维度（与 v1 默认模型
-// text-embedding-3-small 的 1536 维一致；模型切换由 EnsureVecIndex 重建）。
-const vec0Dim = 1536
+// vec0DimOf 读 vec0 索引的当前维度（从 sqlite_master 的建表语句解析；
+// vec0 是虚拟表，维度只在 DDL 里声明，无 SQL 元数据面可查）。
+func (s *Store) vec0DimOf(ctx context.Context) (int, error) {
+	var sqlText string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dgw_sem_vec'`).Scan(&sqlText)
+	if err != nil {
+		return 0, fmt.Errorf("read vec0 definition: %w", err)
+	}
+	m := vec0DimRe.FindStringSubmatch(sqlText)
+	if m == nil {
+		return 0, fmt.Errorf("parse vec0 definition: %q", sqlText)
+	}
+	dim, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("parse vec0 dim %q: %w", m[1], err)
+	}
+	return dim, nil
+}
+
+// vec0DimRe 匹配 vec0 建表语句里的维度声明（float[N]）。
+var vec0DimRe = regexp.MustCompile(`float\[(\d+)\]`)
 
 // PermissionRevision 返回当前权限版本号（热重载轮询的读取面）。
 func (s *Store) PermissionRevision(ctx context.Context) (int64, error) {

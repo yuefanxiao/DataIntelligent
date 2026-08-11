@@ -533,8 +533,10 @@ func cmdSemanticSync() {
 	}
 	// vec0 索引迁移/维护（08 票，ADR-0005 落地）：07 时代的库只有 BLOB
 	// 没有 vec0——幂等建表 + 回填存量同维向量；此后由 SaveEmbeddings
-	// 双写维护。失败降级：检索退化为纯关键词（向量是兜底通道）。
-	if err := semantic.EnsureVecIndex(ctx, st, semantic.DefaultVectorDim); err != nil {
+	// 双写维护。维度自动推导（dim=0）：存量向量取最长维，无存量取默认
+	// 模型维——非 1536 维模型（DGW_EMBEDDING_MODEL 切换）下不反复重建
+	// （review 修复）。失败降级：检索退化为纯关键词（向量是兜底通道）。
+	if err := semantic.EnsureVecIndex(ctx, st, 0); err != nil {
 		log.Printf("vec0 索引维护失败（降级：检索退化为纯关键词）: %v", err)
 	}
 	fmt.Printf("dgw: 语义同步完成（实体 upsert %d / 墓碑 %d，边 %d/%d，枚举 %d/%d）\n",

@@ -51,7 +51,12 @@ func (g *Gateway) handleSearchEntities(ctx context.Context, req *mcp.CallToolReq
 			fmt.Sprintf("未知实体类型 %q（concept / metric）", in.Type),
 			map[string]any{"reason": "bad_type", "type": in.Type})), nil, nil
 	}
-	hits, total, err := semantic.SearchEntities(ctx, g.store, in.Query, in.Type, g.searchEmbed, semantic.SearchLimit)
+	// 向量通道降级（embedding 服务/向量库不可用）如实落网关日志——「向量
+	// 兜底缺失」对排障可见（review 修复）。
+	logf := func(format string, args ...any) {
+		g.logger.Warn("search_entities 向量通道降级（纯关键词检索）", "tool", "search_entities", "err", fmt.Sprintf(format, args...))
+	}
+	hits, total, err := semantic.SearchEntities(ctx, g.store, in.Query, in.Type, g.searchEmbed, semantic.SearchLimit, logf)
 	if err != nil {
 		return errResult(gwerr.Internal(fmt.Sprintf("语义检索失败: %v", err))), nil, nil
 	}
@@ -79,9 +84,10 @@ type getEntityResult struct {
 	Aggregation string `json:"aggregation,omitempty"`
 	Filter      string `json:"filter,omitempty"`
 	// 枚举挂列（列实体）+ 关系摘要：
-	Enums        []enumValueResult       `json:"enums"`
-	Relations    []relationSummaryResult `json:"relations"`
-	RelTruncated bool                    `json:"rel_truncated,omitempty"`
+	Enums          []enumValueResult       `json:"enums"`
+	EnumsTruncated bool                    `json:"enums_truncated,omitempty"`
+	Relations      []relationSummaryResult `json:"relations"`
+	RelTruncated   bool                    `json:"rel_truncated,omitempty"`
 }
 
 type enumValueResult struct {
@@ -109,7 +115,9 @@ func (g *Gateway) handleGetEntity(ctx context.Context, req *mcp.CallToolRequest,
 		FQN: e.FQN, Kind: string(e.Kind), Name: e.Name, Description: e.Description,
 		DataType: e.DataType, IsTime: e.IsTime, PGSchema: e.PGSchema,
 		Expression: e.Expression, Aggregation: e.Aggregation, Filter: e.Filter,
-		RelTruncated: d.RelTruncated,
+		// 空切片初始化：非列实体也输出 []（不是 null），JSON 形状稳定。
+		Enums: []enumValueResult{}, Relations: []relationSummaryResult{},
+		EnumsTruncated: d.EnumsTruncated, RelTruncated: d.RelTruncated,
 	}
 	for _, v := range d.Enums {
 		out.Enums = append(out.Enums, enumValueResult{Value: v.Value, Label: v.Label})

@@ -183,16 +183,25 @@ func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, v
 }
 
 // EnsureVecIndex 确保 vec0 索引存在且维度与 dim 一致（08 票迁移/维护）：
-//   - 表缺失（历史库升级 / 从未同步过）→ 按 dim 建表 + 从 embeddings 回填
-//     同维存量行（07 的 BLOB 与 sqlite-vec 字节兼容，无需重嵌入）；
-//   - 维度不符（DGW_EMBEDDING_MODEL 切换 → 全量重嵌走 SaveEmbeddings，
-//     首条新向量触发重建）→ DROP + 重建 + 回填同维行。
+//   - dim ≤ 0（CLI 迁移路径未指定）：从存量向量推导维度（最长者；
+//     无存量取 DefaultVectorDim）——避免「CLI 硬编码默认维度 vs 实际
+//     模型维度」在非 1536 维模型（DGW_EMBEDDING_MODEL 切换）下反复
+//     重建索引（review 修复）；
+//   - 表缺失（历史库升级 / 从未同步过）→ 按 dim 建表 + 从 embeddings
+//     回填同维存量行（07 的 BLOB 与 sqlite-vec 字节兼容，无需重嵌入）；
+//   - 维度不符（模型切换 → 全量重嵌走 SaveEmbeddings，首条新向量触发
+//     重建）→ DROP + 重建 + 回填同维行。
 //
 // 幂等：维度一致 = 无操作。失败返回错误（调用方降级：检索退化为纯关键词，
 // 与「向量是兜底通道」的定位一致）。
 func EnsureVecIndex(ctx context.Context, st DBer, dim int) error {
 	if dim <= 0 {
-		return fmt.Errorf("EnsureVecIndex: 非法维度 %d", dim)
+		dim = DefaultVectorDim
+		if d, err := maxVectorDim(ctx, st.DB()); err != nil {
+			return err
+		} else if d > 0 {
+			dim = d
+		}
 	}
 	cur, err := vecIndexDim(ctx, st.DB())
 	if err != nil {
@@ -215,6 +224,21 @@ func EnsureVecIndex(ctx context.Context, st DBer, dim int) error {
 		return fmt.Errorf("backfill vec0(%d): %w", dim, err)
 	}
 	return nil
+}
+
+// maxVectorDim 返回存量向量的最大维度（无向量 = 0）。推导依据：模型切换
+// 后全量重嵌，新模型维度是当前事实源；混合维度期间取最大维（旧维行会被
+// 维度过滤排除在回填外）。
+func maxVectorDim(ctx context.Context, db *sql.DB) (int, error) {
+	var bytesLen sql.NullInt64
+	if err := db.QueryRowContext(ctx,
+		`SELECT max(length(vector)) FROM dgw_sem_embeddings`).Scan(&bytesLen); err != nil {
+		return 0, fmt.Errorf("max embedding dim: %w", err)
+	}
+	if !bytesLen.Valid {
+		return 0, nil
+	}
+	return int(bytesLen.Int64) / 4, nil
 }
 
 // vecIndexDim 读 vec0 索引的当前维度（从 sqlite_master 的建表语句解析；

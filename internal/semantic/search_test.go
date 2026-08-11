@@ -3,6 +3,7 @@ package semantic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func TestSearchEntitiesKeyword(t *testing.T) {
 	ctx := context.Background()
 
 	// 「支付失败」（4 字符 ≥3 → FTS5 trigram 短语子串匹配）：概念 + 指标都命中。
-	hits, total, err := SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit)
+	hits, total, err := SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestSearchEntitiesKeyword(t *testing.T) {
 	}
 
 	// type 限定：metric 单入口只出指标。
-	hits, total, err = SearchEntities(ctx, st, "支付失败", "metric", nil, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, "支付失败", "metric", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(metric): %v", err)
 	}
@@ -175,7 +176,7 @@ func TestSearchEntitiesKeyword(t *testing.T) {
 	}
 
 	// 短查询（2 字符 <3 → LIKE 兜底）：同样命中。
-	hits, total, err = SearchEntities(ctx, st, "支付", "", nil, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, "支付", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(短查询): %v", err)
 	}
@@ -184,7 +185,7 @@ func TestSearchEntitiesKeyword(t *testing.T) {
 	}
 
 	// 英文标识符：payment_failure_rate 的 fqn/name 命中。
-	hits, _, err = SearchEntities(ctx, st, "failure_rate", "", nil, SearchLimit)
+	hits, _, err = SearchEntities(ctx, st, "failure_rate", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(英文): %v", err)
 	}
@@ -193,7 +194,7 @@ func TestSearchEntitiesKeyword(t *testing.T) {
 	}
 
 	// 零命中：total = 0、hits 空（非错误）。
-	hits, total, err = SearchEntities(ctx, st, "不存在的领域词xyz", "", nil, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, "不存在的领域词xyz", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(零命中): %v", err)
 	}
@@ -220,7 +221,7 @@ func TestSearchEntitiesRRFOrdering(t *testing.T) {
 	}
 	emb := &scriptedEmbedder{vecs: map[string][]float32{"支付失败": vec(1, 0, 0, 0)}}
 
-	hits, total, err := SearchEntities(ctx, st, "支付失败", "", emb, SearchLimit)
+	hits, total, err := SearchEntities(ctx, st, "支付失败", "", emb, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestSearchEntitiesRRFOrdering(t *testing.T) {
 	}
 
 	// 无 embedder（未配置）：纯关键词检索，不报错、只少向量兜底命中。
-	hits, total, err = SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(nil embedder): %v", err)
 	}
@@ -256,16 +257,24 @@ func TestSearchEntitiesRRFOrdering(t *testing.T) {
 	}
 }
 
-// 向量通道故障（embedder 报错）→ 降级为纯关键词（不阻断主通道）。
+// 向量通道故障（embedder 报错）→ 降级为纯关键词（不阻断主通道），降级
+// 原因经 logf 上报（review 修复：排障可见，不静默）。
 func TestSearchEntitiesVectorDegrades(t *testing.T) {
 	st := searchFixture(t)
 	ctx := context.Background()
-	hits, total, err := SearchEntities(ctx, st, "支付失败", "", failingEmbedder{}, SearchLimit)
+	var logged string
+	logf := func(format string, args ...any) {
+		logged = fmt.Sprintf(format, args...)
+	}
+	hits, total, err := SearchEntities(ctx, st, "支付失败", "", failingEmbedder{}, SearchLimit, logf)
 	if err != nil {
 		t.Fatalf("SearchEntities(向量故障): %v", err)
 	}
 	if total != 2 || len(hits) != 2 {
 		t.Errorf("向量故障降级: total=%d hits=%d，期望 2/2（纯关键词）", total, len(hits))
+	}
+	if logged == "" || !strings.Contains(logged, "embed query") {
+		t.Errorf("降级原因应经 logf 上报，got %q", logged)
 	}
 }
 
@@ -273,10 +282,10 @@ func TestSearchEntitiesVectorDegrades(t *testing.T) {
 func TestSearchEntitiesValidation(t *testing.T) {
 	st := searchFixture(t)
 	ctx := context.Background()
-	if _, _, err := SearchEntities(ctx, st, "  ", "", nil, SearchLimit); err == nil {
+	if _, _, err := SearchEntities(ctx, st, "  ", "", nil, SearchLimit, nil); err == nil {
 		t.Error("空查询应报错")
 	}
-	if _, _, err := SearchEntities(ctx, st, "支付", "table", nil, SearchLimit); err == nil {
+	if _, _, err := SearchEntities(ctx, st, "支付", "table", nil, SearchLimit, nil); err == nil {
 		t.Error("未知类型应报错")
 	}
 }
@@ -386,6 +395,18 @@ func TestTraverseRelations(t *testing.T) {
 	if !found {
 		t.Error("references in 应经入边到达 payments")
 	}
+	// 边保持库内原始方向（payments → orders）+ meta（on 条件原文）——
+	// review 修复：反向遍历不反转边、不丢 meta。
+	if len(res.Edges) != 1 {
+		t.Fatalf("references in 边 = %+v，期望 1 条", res.Edges)
+	}
+	e := res.Edges[0]
+	if e.SrcFQN != "payment-service.payment_db.payments" || e.DstFQN != "order-service.order_db.orders" {
+		t.Errorf("in 方向边方向 = %s → %s，期望 payments → orders（库内原方向）", e.SrcFQN, e.DstFQN)
+	}
+	if e.Meta != "payments.order_id = orders.id" {
+		t.Errorf("in 方向边 meta = %q，期望 on 条件原文", e.Meta)
+	}
 
 	// 缺省深度 = 1：payment_db 的 contains 只到表，不到列。
 	res, err = TraverseRelations(ctx, st, "payment-service.payment_db", RelContains, "out", 0, MaxTraverseNodes)
@@ -403,6 +424,34 @@ func TestTraverseRelations(t *testing.T) {
 	// 非法方向报错。
 	if _, err := TraverseRelations(ctx, st, "payment-service", RelContains, "sideways", 1, MaxTraverseNodes); err == nil {
 		t.Error("非法方向应报错")
+	}
+}
+
+// 遍历有界性：节点数触界 → truncated + 子图一致（无悬空边）；深度输入
+// 超硬上限 → 截断 + truncated 如实标记。
+func TestTraverseRelationsBounded(t *testing.T) {
+	st := searchFixture(t)
+	ctx := context.Background()
+
+	// 节点上限 1（只容起点）：contains 出边全被丢弃，truncated=true。
+	res, err := TraverseRelations(ctx, st, "payment-service.payment_db", RelContains, "out", 2, 1)
+	if err != nil {
+		t.Fatalf("TraverseRelations(节点触界): %v", err)
+	}
+	if !res.Truncated {
+		t.Error("节点触界应 truncated=true")
+	}
+	if len(res.Nodes) != 1 || len(res.Edges) != 0 {
+		t.Errorf("触界结果 = %d 节点 %d 边，期望 1/0（子图一致）", len(res.Nodes), len(res.Edges))
+	}
+
+	// 深度输入超硬上限（5）：截断到 5 并如实标记 truncated。
+	res, err = TraverseRelations(ctx, st, "payment-service", RelContains, "out", 99, MaxTraverseNodes)
+	if err != nil {
+		t.Fatalf("TraverseRelations(深度触界): %v", err)
+	}
+	if !res.Truncated {
+		t.Error("深度超硬上限应 truncated=true（结果比请求小，如实标记）")
 	}
 }
 
@@ -508,7 +557,7 @@ func TestFTSMaintenance(t *testing.T) {
 	if _, err := Sync(ctx, st, dir); err != nil {
 		t.Fatalf("Sync(删 refund_flow): %v", err)
 	}
-	hits, _, err := SearchEntities(ctx, st, "退款流程", "", nil, SearchLimit)
+	hits, _, err := SearchEntities(ctx, st, "退款流程", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(墓碑): %v", err)
 	}
@@ -523,7 +572,7 @@ func TestFTSMaintenance(t *testing.T) {
 	if _, err := Sync(ctx, st, dir); err != nil { // 无 diff 的幂等重跑
 		t.Fatalf("Sync(回填): %v", err)
 	}
-	hits, total, err := SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit)
+	hits, total, err := SearchEntities(ctx, st, "支付失败", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(回填后): %v", err)
 	}
@@ -546,7 +595,7 @@ func TestVecIndexMaintenance(t *testing.T) {
 		t.Fatalf("SaveEmbeddings: %v", err)
 	}
 	emb4 := &scriptedEmbedder{vecs: map[string][]float32{q: vec(1, 0, 0, 0)}}
-	hits, total, err := SearchEntities(ctx, st, q, "", emb4, SearchLimit)
+	hits, total, err := SearchEntities(ctx, st, q, "", emb4, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(向量): %v", err)
 	}
@@ -564,7 +613,7 @@ func TestVecIndexMaintenance(t *testing.T) {
 		t.Fatalf("SaveEmbeddings(维度切换): %v", err)
 	}
 	emb8 := &scriptedEmbedder{vecs: map[string][]float32{q: {1, 0, 0, 0, 0, 0, 0, 0}}}
-	hits, total, err = SearchEntities(ctx, st, q, "", emb8, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, q, "", emb8, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(重建后): %v", err)
 	}
@@ -576,7 +625,7 @@ func TestVecIndexMaintenance(t *testing.T) {
 	if err := RemoveEmbeddings(ctx, st, []string{"payment_failure"}); err != nil {
 		t.Fatalf("RemoveEmbeddings: %v", err)
 	}
-	hits, total, err = SearchEntities(ctx, st, q, "", emb8, SearchLimit)
+	hits, total, err = SearchEntities(ctx, st, q, "", emb8, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(双删后): %v", err)
 	}
@@ -605,7 +654,7 @@ func TestSearchEntitiesBounded(t *testing.T) {
 			t.Fatalf("直插 FTS: %v", err)
 		}
 	}
-	hits, total, err := SearchEntities(ctx, st, "bounded", "", nil, SearchLimit)
+	hits, total, err := SearchEntities(ctx, st, "bounded", "", nil, SearchLimit, nil)
 	if err != nil {
 		t.Fatalf("SearchEntities(有界): %v", err)
 	}

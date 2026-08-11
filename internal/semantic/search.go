@@ -70,12 +70,13 @@ type SearchHit struct {
 //     按实体类型过滤（kind 列，查询侧）。
 //   - 向量兜底通道：查询文本经 emb 嵌入 → vec0 KNN 取候选。emb 为 nil
 //     或向量库不可用（未同步/维度不符/嵌入失败）= 降级为纯关键词检索
-//     （向量是兜底通道，缺失不阻断主通道）。
+//     （向量是兜底通道，缺失不阻断主通道）；降级原因经 logf 上报
+//     （调用方负责落日志，同 EmbedEntityTexts 的 logf 惯例；nil = 静默）。
 //   - 融合：加权 RRF（关键词 2 : 向量 1，k=60）→ 关键词命中恒在向量
 //     命中之前（ADR-0002）；返回 ≤ limit 条 + total（候选并集大小）。
 //
 // typ 限定实体类型："" = 概念+指标双入口混合；"concept" / "metric" 单入口。
-func SearchEntities(ctx context.Context, st DBer, query, typ string, emb Embedder, limit int) ([]SearchHit, int, error) {
+func SearchEntities(ctx context.Context, st DBer, query, typ string, emb Embedder, limit int, logf func(format string, args ...any)) ([]SearchHit, int, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, 0, fmt.Errorf("SearchEntities: 查询为空")
 	}
@@ -96,7 +97,11 @@ func SearchEntities(ctx context.Context, st DBer, query, typ string, emb Embedde
 	if emb != nil {
 		vecHits, err = vectorHits(ctx, st, emb, query, typ, SearchCandidateCap)
 		if err != nil {
-			// 降级：向量通道故障不阻断主通道（失败只记日志的契约在调用方）。
+			// 降级：向量通道故障不阻断主通道；原因如实上报（网关落日志，
+			// 「向量兜底缺失」对排障可见——review 修复）。
+			if logf != nil {
+				logf("search_entities 向量通道降级为纯关键词: %v", err)
+			}
 			vecHits = nil
 		}
 	}
@@ -339,9 +344,10 @@ func entitiesByFQNs(ctx context.Context, st DBer, fqns []string) (map[string]Ent
 // 关系摘要（四类边 × 出入方向，有界）。
 type EntityDetail struct {
 	Entity
-	Enums        []EnumValue       // 列实体的枚举取值（非列 = 空）
-	Relations    []RelationSummary // 关系摘要（按类型分组，仅非空类型）
-	RelTruncated bool              // 关系摘要触界截断
+	Enums          []EnumValue       // 列实体的枚举取值（非列 = 空；有界）
+	EnumsTruncated bool              // 枚举触界截断（>EnumValuesLimit）
+	Relations      []RelationSummary // 关系摘要（按类型分组，仅非空类型）
+	RelTruncated   bool              // 关系摘要触界截断
 }
 
 // RelationSummary 是一类关系边的出入摘要（FQN 字符串，按 FQN 排序）。
@@ -365,6 +371,12 @@ func GetEntityDetail(ctx context.Context, st DBer, fqn string) (*EntityDetail, e
 		d.Enums, err = enumValuesFor(ctx, st, fqn, EnumValuesLimit+1)
 		if err != nil {
 			return nil, err
+		}
+		// 枚举挂列同样有界（spec §4.9「语义列表返回上限」）：多取一行
+		// 判定截断，超限截断到上限（review 修复）。
+		if len(d.Enums) > EnumValuesLimit {
+			d.Enums = d.Enums[:EnumValuesLimit]
+			d.EnumsTruncated = true
 		}
 	}
 	// 关系摘要：一次查询取全部入/出边（有界 + 截断标记），按类型分组。
@@ -424,9 +436,11 @@ type TraversalResult struct {
 
 // TraverseRelations 沿类型化关系边做有界遍历（ADR-0001「双向可遍历」）：
 // BFS，起点缺失返回 ErrNotFound。direction = out（沿 src→dst）/ in（沿
-// dst→src 反向）/ both；maxDepth ≤ MaxTraverseDepth（超限截断）、节点数
-// ≤ maxNodes（触界 truncated=true，超出的边一并丢弃——结果始终是
-// 节点集内一致的子图，无悬空边）。
+// dst→src 反向）/ both；maxDepth ≤ MaxTraverseDepth（输入超限截断到硬
+// 上限并标记 truncated）、节点数 ≤ maxNodes（触界 truncated=true，超出
+// 的边一并丢弃——结果始终是节点集内一致的子图，无悬空边）。边按库内
+// 真实方向返回（in 方向遍历到的边仍是 src→dst 原方向，含 meta，如
+// references 的 on 条件——review 修复：反向遍历不反转边）。
 func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationType, direction string, maxDepth, maxNodes int) (*TraversalResult, error) {
 	if e, err := GetEntity(ctx, st, start); err != nil {
 		return nil, err
@@ -438,7 +452,8 @@ func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationT
 	default:
 		return nil, fmt.Errorf("TraverseRelations: 未知遍历方向 %q（out / in / both）", direction)
 	}
-	maxDepth = min(max(maxDepth, 1), MaxTraverseDepth) // 缺省 1、硬上限 5
+	depthCapped := maxDepth > MaxTraverseDepth // 输入超硬上限：结果比请求小，如实标记
+	maxDepth = min(max(maxDepth, 1), MaxTraverseDepth)
 
 	type queueItem struct {
 		fqn   string
@@ -447,7 +462,7 @@ func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationT
 	visited := map[string]bool{start: true}
 	edgeSet := map[edgeKey]Relation{}
 	queue := []queueItem{{fqn: start, depth: 0}}
-	truncated := false
+	truncated := depthCapped
 
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -455,20 +470,15 @@ func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationT
 		if cur.depth >= maxDepth {
 			continue // 深度已到界：不再展开（节点本身已收录）
 		}
-		var neighbors []string
-		var err error
-		switch direction {
-		case "out":
-			neighbors, err = relationTargets(ctx, st, typ, cur.fqn)
-		case "in":
-			neighbors, err = relationSources(ctx, st, typ, cur.fqn)
-		case "both":
-			neighbors, err = bothNeighbors(ctx, st, typ, cur.fqn)
-		}
+		edges, err := relationEdges(ctx, st, typ, cur.fqn, direction)
 		if err != nil {
 			return nil, err
 		}
-		for _, nb := range neighbors {
+		for _, e := range edges {
+			nb := e.DstFQN
+			if nb == cur.fqn {
+				nb = e.SrcFQN // in 方向的边（dst = 本实体）
+			}
 			if !visited[nb] {
 				if len(visited) >= maxNodes {
 					truncated = true
@@ -477,7 +487,7 @@ func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationT
 				visited[nb] = true
 				queue = append(queue, queueItem{fqn: nb, depth: cur.depth + 1})
 			}
-			edgeSet[edgeKey{typ, cur.fqn, nb}] = Relation{Type: typ, SrcFQN: cur.fqn, DstFQN: nb}
+			edgeSet[edgeKey{e.Type, e.SrcFQN, e.DstFQN}] = e
 		}
 	}
 
@@ -510,33 +520,52 @@ func TraverseRelations(ctx context.Context, st DBer, start string, typ RelationT
 	return res, nil
 }
 
+// relationEdges 返回某实体沿指定类型边的全部关系行（方向已按 direction
+// 解析，边保持库内原始方向 + meta）：
+//   - out：src = 本实体的边（沿 src→dst 前进）；
+//   - in：dst = 本实体的边（沿 dst→src 反向前进，边的 src/dst 不反转）；
+//   - both：两者并集。
+//
+// 排序稳定（src, dst），遍历结果确定性。
+func relationEdges(ctx context.Context, st DBer, typ RelationType, fqn, direction string) ([]Relation, error) {
+	rows, err := st.DB().QueryContext(ctx, `
+		SELECT src_fqn, dst_fqn, meta FROM dgw_sem_relations
+		WHERE type = ? AND tombstone = 0 AND (src_fqn = ? OR dst_fqn = ?)
+		ORDER BY src_fqn, dst_fqn`, string(typ), fqn, fqn)
+	if err != nil {
+		return nil, fmt.Errorf("relations %s of %s: %w", typ, fqn, err)
+	}
+	defer rows.Close()
+	out := []Relation{}
+	for rows.Next() {
+		var r Relation
+		r.Type = typ
+		if err := rows.Scan(&r.SrcFQN, &r.DstFQN, &r.Meta); err != nil {
+			return nil, err
+		}
+		switch direction {
+		case "out":
+			if r.SrcFQN != fqn {
+				continue
+			}
+		case "in":
+			if r.DstFQN != fqn {
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // edgeKey 是遍历边去重键（同一条边经多条路径触达只记一次）。
 type edgeKey struct {
 	typ RelationType
 	src string
 	dst string
-}
-
-// bothNeighbors 返回 out + in 两个方向的邻居（去重、排序）。
-func bothNeighbors(ctx context.Context, st DBer, typ RelationType, fqn string) ([]string, error) {
-	out, err := relationTargets(ctx, st, typ, fqn)
-	if err != nil {
-		return nil, err
-	}
-	in, err := relationSources(ctx, st, typ, fqn)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	res := []string{}
-	for _, f := range append(out, in...) {
-		if !seen[f] {
-			seen[f] = true
-			res = append(res, f)
-		}
-	}
-	sort.Strings(res)
-	return res, nil
 }
 
 // ── get_metric_definition：口径 + dry-run 展开 ─────────────────────────
