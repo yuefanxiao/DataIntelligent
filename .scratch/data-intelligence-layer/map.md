@@ -31,6 +31,8 @@ Status: open
 - [05 语义层本体模型：MDL vs 自研、v1 最小集合](https://github.com/yuefanxiao/DataIntelligent/issues/6) — 混合本体：UModel 式 sets-and-links 图谱承载服务↔库↔表↔列↔概念拓扑 + OSI 式声明式 SQL 指标挂载，自研补枚举取值语义与服务↔库映射；消费=工具发现为主(P2)+模糊检索(P3)+公式机器可读/dry-run(light P5)，概念与指标双入口；六类实体 + 四种关系边(connects_to/contains/references/describes) + 枚举挂列 + is_time；Database 粒度=PG database；无指标走表/列原料路径，新指标=人工确认回写 YAML（指标沉淀）；解封 07/08/12，输出 10（表达式可读+dry-run）、03（FQN 权限挂载点）、02（有界返回）。
 - [07 语义层存储与检索决策](https://github.com/yuefanxiao/DataIntelligent/issues/8) — 存储=同机房独立 PG 实例（同步管线零生产凭证）+ 按服务拆 YAML 作者入口 + 自研 Go 同步管线（幂等 upsert + 墓碑 + dry-run diff）；运行时只查 PG 不查 YAML；检索=五条数据层原语（FQN 精确/双入口关键词/类型化边遍历/指标公式/枚举值，工具协议留 02），search_entities 走 RRF 混合（pg_trgm 关键词主通道 + pgvector 向量兜底，不设固定比例）；v1 引入向量，embedding=外部 OpenAI text-embedding-3（接受元数据出机房）；不引入图数据库。输出 08/02/10/11。
 
+- [02 Gateway v1 工具面：暴露哪些 MCP 工具](https://github.com/yuefanxiao/DataIntelligent/issues/3) — v1 工具面 = 六只读工具 + 一轻量 Agent Skill，细粒度一一对应、原语直译命名（search_entities 双入口 RRF / get_entity FQN 精确 / traverse_relations 边遍历 / get_metric_definition 公式+dry-run 展开 / list_enum_values / execute_sql 只读）；有界返回（语义列表 ≤20+total、SQL 默认 500/硬上限 5000 + truncated）；execute_sql 留可选 plan_id 溯源口子；v1 不做 create_query_plan（方案乙草案入 docs/research/02-query-planning-design.md 作 10 输入）；结果编码 JSON、限额数值归 12。输出 03/04/10/12；解封 03/04/12。
+
 ## Not yet specified
 
 - 管理工作台/控制台形态（权限与 API key 的更新界面）——权限模型票据解决后可能浮出
