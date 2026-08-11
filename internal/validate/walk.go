@@ -6,8 +6,10 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 )
 
-// walker 是语法树遍历器：一次深度遍历同时服务两个消费者——分类检查
-// （数据修改 CTE/写副作用）与表引用提取（去重、按首次出现顺序）。
+// walker 是语法树遍历器：一次深度遍历产出两类信息——分类检查（数据修改
+// CTE/写副作用）与表引用提取（去重、按首次出现顺序）。ClassifyStmt 与
+// ExtractTables 各自消费一类；遍历不提前终止（树小，不值得为此复杂化），
+// 违规只记录首个。
 //
 // CTE 作用域：WITH 的 CTE 名在 walkSelect 入口先于整棵语句注册（语句体与
 // CTE 定义体共享同一作用域，递归/互引 CTE 自引用可见）；RangeVar 命中
@@ -25,7 +27,7 @@ type walker struct {
 
 	ctes []map[string]struct{} // CTE 名作用域栈（近者优先）
 
-	// 分类收集器（首个违规即停，供 ClassifyStmt 读取）。
+	// 分类收集器（记录首个违规，供 ClassifyStmt 读取）。
 	modifyingCTE  string // 数据修改 CTE 名
 	modifyingKind string // 其语句类型机器名（insert_stmt 等）
 	intoClause    bool   // SELECT INTO（建表写副作用）
@@ -46,9 +48,12 @@ func (w *walker) walk(n *pgquery.Node) {
 	switch v := n.Node.(type) {
 	case *pgquery.Node_RangeVar:
 		rv := v.RangeVar
-		if !w.cteInScope(rv.Relname) {
-			w.addRef(rv.Schemaname, rv.Relname)
+		// CTE 名只存在于未限定命名空间：schema 限定引用（public.x）永不解析到
+		// CTE，必须作为真实表收集——否则可借「与 CTE 同名」让未授权表绕过比对。
+		if rv.Schemaname == "" && w.cteInScope(rv.Relname) {
+			return
 		}
+		w.addRef(rv.Schemaname, rv.Relname)
 	case *pgquery.Node_CommonTableExpr:
 		cte := v.CommonTableExpr
 		if cte != nil && w.modifyingCTE == "" {
@@ -150,8 +155,8 @@ var (
 )
 
 // walkStruct 反射下钻任意消息结构：遍历全部导出字段；*Node / []*Node 字段
-// 重新进入类型派发（发现嵌套子查询/CTE/表引用），SelectStmt/Query 走各自
-// 的作用域处理，其余消息结构递归下钻。protoimpl 内部字段不可导出，天然跳过。
+// 重新进入类型派发（发现嵌套子查询/CTE/表引用），其余消息结构递归下钻。
+// protoimpl 内部字段不可导出，天然跳过。
 func (w *walker) walkStruct(v any) {
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
@@ -175,38 +180,30 @@ func (w *walker) walkStruct(v any) {
 		fv := rv.Field(i)
 		switch f.Type.Kind() {
 		case reflect.Pointer:
-			switch f.Type {
-			case nodeType:
-				w.walk(fv.Interface().(*pgquery.Node))
-			case selectStmtType:
-				w.walkSelect(fv.Interface().(*pgquery.SelectStmt))
-			case queryType:
-				w.walkQuery(fv.Interface().(*pgquery.Query))
-			default:
-				w.walkStruct(fv.Interface())
-			}
+			w.walkTyped(fv, f.Type)
 		case reflect.Slice:
 			if f.Type.Elem().Kind() != reflect.Pointer {
 				continue // []string / []enum 等叶子
 			}
-			switch f.Type.Elem() {
-			case nodeType:
-				for j := 0; j < fv.Len(); j++ {
-					w.walk(fv.Index(j).Interface().(*pgquery.Node))
-				}
-			case selectStmtType:
-				for j := 0; j < fv.Len(); j++ {
-					w.walkSelect(fv.Index(j).Interface().(*pgquery.SelectStmt))
-				}
-			case queryType:
-				for j := 0; j < fv.Len(); j++ {
-					w.walkQuery(fv.Index(j).Interface().(*pgquery.Query))
-				}
-			default:
-				for j := 0; j < fv.Len(); j++ {
-					w.walkStruct(fv.Index(j).Interface())
-				}
+			for j := 0; j < fv.Len(); j++ {
+				w.walkTyped(fv.Index(j), f.Type.Elem())
 			}
 		}
+	}
+}
+
+// walkTyped 对 *T / []*T 的元素分派：Node 重新进入类型派发（子查询/CTE/
+// 表引用），SelectStmt/Query 走各自的作用域处理，其余消息结构反射下钻。
+// 单元素与切片元素共用此分派，避免两处三路 switch 漂移。
+func (w *walker) walkTyped(v reflect.Value, t reflect.Type) {
+	switch t {
+	case nodeType:
+		w.walk(v.Interface().(*pgquery.Node))
+	case selectStmtType:
+		w.walkSelect(v.Interface().(*pgquery.SelectStmt))
+	case queryType:
+		w.walkQuery(v.Interface().(*pgquery.Query))
+	default:
+		w.walkStruct(v.Interface())
 	}
 }

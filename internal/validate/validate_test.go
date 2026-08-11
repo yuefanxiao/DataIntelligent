@@ -168,6 +168,10 @@ func TestExtractTables(t *testing.T) {
 		{"cte_join", `WITH a AS (SELECT * FROM orders), b AS (SELECT * FROM users) SELECT * FROM a JOIN b ON true`, []string{"orders", "users"}},
 		{"cte_recursive", `WITH RECURSIVE n AS (SELECT 1 UNION ALL SELECT n + 1 FROM n WHERE n < 10) SELECT * FROM n`, []string{}},
 		{"cte_shadowing", `WITH x AS (SELECT * FROM orders) SELECT * FROM (WITH x AS (SELECT * FROM users) SELECT * FROM x) s`, []string{"users", "orders"}},
+		{"cte_collision_schema_qualified", `WITH x AS (SELECT 1) SELECT * FROM public.x`, []string{"public.x"}},
+		{"cte_collision_unqualified", `WITH x AS (SELECT 1) SELECT * FROM x`, []string{}},
+		// 非递归 CTE 自引用是 PG 分析期拒绝的非法 SQL；抑制是安全的过近似。
+		{"cte_self_reference_invalid_sql", `WITH x AS (SELECT * FROM x) SELECT * FROM x`, []string{}},
 		{"cte_mutual_ref", `WITH a AS (SELECT * FROM b), b AS (SELECT * FROM orders) SELECT * FROM a`, []string{"orders"}},
 		{"setop_union", `SELECT * FROM orders UNION ALL SELECT * FROM orders_backup`, []string{"orders", "orders_backup"}},
 		{"setop_intersect", `SELECT * FROM users INTERSECT SELECT * FROM users_backup`, []string{"users", "users_backup"}},

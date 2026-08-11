@@ -26,7 +26,7 @@ docs/spec.md §2.2/§4.5/§5；ADR-0008；issue #15
 - `internal/validate` 独立包（validate.go + walk.go）：Parse / ClassifyStmt / ExtractTables / AuthorizeTables / Check
 - 遍历器：CTE 作用域（递归/互引/遮蔽）+ 反射下钻（子查询/join/集合运算全可见，函数实参内隐藏子查询不漏）
 - 比对注入式 Resolve/Allow（FQN 解析归 04 接线，白名单归 authz）
-- 超出枚举拒绝集的「只读推论」：SELECT INTO / 行锁子句（FOR UPDATE/SHARE/…）→ write_side_effect；EXPLAIN 整体按 utility 拒绝
+- 拒绝集补充：SELECT INTO / 行锁子句（FOR UPDATE/SHARE/…）→ write_side_effect（只读推论）；EXPLAIN 按 utility 拒绝（spec §4.5 字面）
 - 单测 60+ 例：分类 28 拒绝例 + 7 通过例 / 提取 31 例 / 比对 6 例 / 端到端拒绝语义 6 例
 
 ## Blocked by

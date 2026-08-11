@@ -7,12 +7,13 @@
 // 解析/白名单回调，输出 Report 或结构化错误（gwerr，kind + details.reason
 // 机器可区分）。
 //
-// 立场（在 spec §4.5 枚举拒绝集之上的「只读网关」必然推论，均在拒绝集测试
-// 覆盖内）：
+// 立场说明：
+//   - EXPLAIN 按 utility 拒绝 = spec §4.5「utility 一律拒绝」的字面要求；
+//     「EXPLAIN 不作授权依据」落地为：授权只发生在 AST 语法层，planner 层
+//     （EXPLAIN 输出）从不参与。
 //   - SELECT INTO（建表）与任何行锁子句（FOR UPDATE/SHARE/…，PG 只读事务
-//     对 FOR SHARE 的语义版本间不统一，网关不赌）→ 按写副作用拒绝；
-//   - EXPLAIN 一律按 utility 拒绝——「EXPLAIN 不作授权依据」落地为：授权只
-//     发生在 AST 语法层，planner 层（EXPLAIN 输出）从不参与。
+//     对 FOR SHARE 的语义版本间不统一，网关不赌）是「只读网关」的推论性
+//     扩展，按写副作用拒绝（均入拒绝集测试）。
 package validate
 
 import (
