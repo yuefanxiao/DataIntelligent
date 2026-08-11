@@ -78,7 +78,7 @@ func Verify(ctx context.Context, db *sql.DB, plaintext string) (string, error) {
 
 // KeyInfo 是快照视图里的一把 key（明文不存在，哈希即身份标识）。
 type KeyInfo struct {
-	ID        int64  // 行 ID：吊销命令的寻址句柄
+	ID        int64 // 行 ID：吊销命令的寻址句柄
 	UserID    string
 	CreatedAt string
 	RevokedAt string // 空串 = 有效

@@ -69,8 +69,9 @@ type SyncResult struct {
 	Revision int64
 }
 
-// Sync 把 grants YAML 全量编译进 SQLite 权限表（ADR-0004「编译进权限表」）：
-// 单事务 = 清空旧表授权 → 写入 YAML 声明 → bump revision。
+// Sync 把 grants YAML 全量编译进 SQLite 权限表（ADR-0004「编译进权限表」；
+// 存储载体经 ADR-0005 修正为 SQLite）：单事务 = 清空旧表授权 → 写入 YAML
+// 声明 → bump revision。零变更（净 diff 为空）不写库不 bump。
 //
 // YAML 是表授权的事实源：CLI 的 grant-add/remove 是临时调整，apply 后回到
 // YAML 状态（git review 即权限变更评审闸门）。
@@ -101,6 +102,11 @@ func Sync(ctx context.Context, st *store.Store, f File) (SyncResult, error) {
 			res.Added++
 		}
 	}
+	if res.Added == 0 && res.Removed == 0 {
+		// 零变更：不写库也不 bump（与 AddGrant/RemoveGrant 的 no-op 纪律一致）。
+		res.Revision, err = st.PermissionRevision(ctx)
+		return res, err
+	}
 
 	tx, err := st.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -120,7 +126,7 @@ func Sync(ctx context.Context, st *store.Store, f File) (SyncResult, error) {
 			}
 		}
 	}
-	if err := st.BumpPermissionRevision(ctx, tx); err != nil {
+	if err := st.BumpPermissionRevisionTx(ctx, tx); err != nil {
 		return SyncResult{}, err
 	}
 	if err := tx.Commit(); err != nil {

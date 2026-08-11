@@ -45,11 +45,11 @@ func TestAllowDefaultDeny(t *testing.T) {
 		user, fqn string
 		want      bool
 	}{
-		{"dev-alice", "bss.payment_db.t_payment", true},  // 白名单命中
-		{"dev-alice", "bss.payment_db.t_order", false},   // 未授权表
-		{"dev-bob", "bss.payment_db.t_payment", false},   // 未授权用户
-		{"dev-alice", "svc.db.tbl", false},               // 未知表
-		{"", "bss.payment_db.t_payment", false},          // 无身份
+		{"dev-alice", "bss.payment_db.t_payment", true}, // 白名单命中
+		{"dev-alice", "bss.payment_db.t_order", false},  // 未授权表
+		{"dev-bob", "bss.payment_db.t_payment", false},  // 未授权用户
+		{"dev-alice", "svc.db.tbl", false},              // 未知表
+		{"", "bss.payment_db.t_payment", false},         // 无身份
 	}
 	for _, tc := range cases {
 		if got := svc.Allow(tc.user, tc.fqn); got != tc.want {
@@ -136,9 +136,9 @@ func TestReloadLoopPicksUpChanges(t *testing.T) {
 	t.Fatal("轮询 5s 未感知 grant（revision 热重载失效）")
 }
 
-// 热重载失败保留旧快照（fail closed，不出现中间态）：
-// Load 报错后 Allow 行为不变。
-func TestLoadFailureKeepsOldSnapshot(t *testing.T) {
+// 热重载失败 = fail closed（零未授权访问底线）：Load 报错后快照置为
+// 未加载（Allow 全拒）+ revision 归 -1（下一轮轮询必重试，恢复后自愈）。
+func TestLoadFailureFailsClosed(t *testing.T) {
 	svc, st := newService(t)
 	ctx := context.Background()
 
@@ -157,8 +157,12 @@ func TestLoadFailureKeepsOldSnapshot(t *testing.T) {
 	if err := svc.Load(ctx); err == nil {
 		t.Fatal("库已关闭，Load 应失败")
 	}
-	if !svc.Allow("dev-alice", "bss.payment_db.t_payment") {
-		t.Error("Load 失败后应保留旧快照（旧授权仍生效）")
+	// 快照已置未加载：连之前授权的表也一律拒绝（不保留旧快照）。
+	if svc.Allow("dev-alice", "bss.payment_db.t_payment") {
+		t.Error("Load 失败后应 fail closed（全拒），不得保留旧快照放行")
+	}
+	if rev := svc.Revision(); rev != -1 {
+		t.Errorf("失败后 revision = %d, want -1（保证轮询必然重试）", rev)
 	}
 }
 

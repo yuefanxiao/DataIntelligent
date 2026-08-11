@@ -260,11 +260,11 @@ func cmdGrantsApply() {
 	defer fh.Close()
 	f, err := grants.Parse(fh)
 	if err != nil {
-		log.Fatalf("grants YAML 编译失败: %v", err)
+		log.Fatalf("解析 grants YAML 失败: %v", err)
 	}
 	res, err := grants.Sync(context.Background(), st, f)
 	if err != nil {
-		log.Fatalf("grants YAML 编译失败: %v", err)
+		log.Fatalf("编译 grants YAML 进权限表失败: %v", err)
 	}
 	fmt.Printf("dgw: grants YAML 已编译进权限表（新增 %d 条 / 移除 %d 条，revision %d，热重载生效中）\n",
 		res.Added, res.Removed, res.Revision)

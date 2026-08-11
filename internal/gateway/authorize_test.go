@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +12,7 @@ import (
 
 	"github.com/yuefanxiao/DataIntelligent/internal/grants"
 	"github.com/yuefanxiao/DataIntelligent/internal/gwerr"
+	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
 // 业务面授权入口（AuthorizeBusinessTable）：默认拒绝——未授权表、未授权
@@ -87,8 +91,30 @@ func TestSemanticSurfaceSkipsTableAuthz(t *testing.T) {
 	}
 }
 
+// 启动加载（AC2）：授权在网关启动前已写入 → New 后直接生效，无需显式加载。
+func TestNewLoadsGrantsFromStore(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "dgw.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// CLI 侧先写好授权，再启动网关。
+	if err := grants.AddGrant(context.Background(), st, "dev-alice", "bss.payment_db.t_payment"); err != nil {
+		t.Fatalf("AddGrant: %v", err)
+	}
+
+	g, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	if e := g.AuthorizeBusinessTable(withUserID(context.Background(), "dev-alice"), "bss.payment_db.t_payment"); e != nil {
+		t.Errorf("启动加载后应放行已授权表, got %v", e)
+	}
+}
+
 // 热重载端到端（网关进程内）：CLI 侧写入（模拟）→ revision 变化 →
-// ReloadLoop 感知 → 业务面授权立即生效。
+// ReloadLoop 感知 → 业务面授权立即生效；revoke 方向同样无需重启。
 func TestAuthorizeHotReloadEndToEnd(t *testing.T) {
 	g, st := newTestGateway(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -104,14 +130,36 @@ func TestAuthorizeHotReloadEndToEnd(t *testing.T) {
 	if err := grants.AddGrant(context.Background(), st, "dev-alice", "bss.payment_db.t_payment"); err != nil {
 		t.Fatalf("AddGrant: %v", err)
 	}
+	waitAllow(t, g, aliceCtx, "bss.payment_db.t_payment", "grant 后授权生效")
 
-	// 轮询周期内授权应自动生效（兜底 5s 上限）。
+	// revoke 方向：CLI 撤权后轮询周期内回到拒绝（吊销即时 + 热重载）。
+	if err := grants.RemoveGrant(context.Background(), st, "dev-alice", "bss.payment_db.t_payment"); err != nil {
+		t.Fatalf("RemoveGrant: %v", err)
+	}
+	waitDeny(t, g, aliceCtx, "bss.payment_db.t_payment", "revoke 后授权收回")
+}
+
+// waitAllow / waitDeny 轮询等待授权状态翻转（热重载测试的公共等待）。
+func waitAllow(t *testing.T, g *Gateway, ctx context.Context, fqn, what string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if e := g.AuthorizeBusinessTable(aliceCtx, "bss.payment_db.t_payment"); e == nil {
-			return // 热重载已生效
+		if e := g.AuthorizeBusinessTable(ctx, fqn); e == nil {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("5s 内授权未生效（热重载链路断裂）")
+	t.Fatalf("5s 内 %s 未生效（热重载链路断裂）", what)
+}
+
+func waitDeny(t *testing.T, g *Gateway, ctx context.Context, fqn, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if e := g.AuthorizeBusinessTable(ctx, fqn); e != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("5s 内 %s 未生效（热重载链路断裂）", what)
 }

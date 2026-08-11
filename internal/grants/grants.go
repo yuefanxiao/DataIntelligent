@@ -12,6 +12,7 @@ package grants
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -59,29 +60,15 @@ func AddGrant(ctx context.Context, st *store.Store, user, tableFQN string) error
 	if err := ValidateFQN(tableFQN); err != nil {
 		return err
 	}
-	tx, err := st.DB().BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	res, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO dgw_table_grants (user_id, table_fqn) VALUES (?, ?)`,
-		user, tableFQN)
-	if err != nil {
-		return fmt.Errorf("insert grant: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("insert grant: %w", err)
-	}
-	if n == 0 {
-		return tx.Commit() // 已存在：幂等 no-op，不 bump
-	}
-	if err := st.BumpPermissionRevision(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return mutate(ctx, st, "insert grant", func(tx *sql.Tx) (int64, error) {
+		res, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO dgw_table_grants (user_id, table_fqn) VALUES (?, ?)`,
+			user, tableFQN)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	})
 }
 
 // RemoveGrant 撤掉用户对一张表的授权（幂等：不存在视为成功）。
@@ -89,26 +76,35 @@ func RemoveGrant(ctx context.Context, st *store.Store, user, tableFQN string) er
 	if err := ValidateFQN(tableFQN); err != nil {
 		return err
 	}
+	return mutate(ctx, st, "delete grant", func(tx *sql.Tx) (int64, error) {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM dgw_table_grants WHERE user_id = ? AND table_fqn = ?`,
+			user, tableFQN)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	})
+}
+
+// mutate 是授权写入的公共事务骨架：单语句变更 + 热重载信号。
+// rowsAffected == 0 = 幂等 no-op（不 bump revision，避免无谓热重载）；
+// 否则 bump 后提交——数据与版本号同一事务，网关不会看到中间态。
+func mutate(ctx context.Context, st *store.Store, op string, fn func(tx *sql.Tx) (int64, error)) error {
 	tx, err := st.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx,
-		`DELETE FROM dgw_table_grants WHERE user_id = ? AND table_fqn = ?`,
-		user, tableFQN)
+	n, err := fn(tx)
 	if err != nil {
-		return fmt.Errorf("delete grant: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete grant: %w", err)
+		return fmt.Errorf("%s: %w", op, err)
 	}
 	if n == 0 {
-		return tx.Commit() // 不存在：幂等 no-op，不 bump
+		return tx.Commit()
 	}
-	if err := st.BumpPermissionRevision(ctx, tx); err != nil {
+	if err := st.BumpPermissionRevisionTx(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()

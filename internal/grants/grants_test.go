@@ -181,32 +181,32 @@ func TestParseErrors(t *testing.T) {
 		yaml string
 		want string
 	}{
-		"版本不符":      {`version: 2
+		"版本不符": {`version: 2
 grants: []`, "version = 2"},
-		"缺 version":   {`grants: []`, "version"},
-		"未知字段":       {`version: 1
+		"缺 version": {`grants: []`, "version"},
+		"未知字段": {`version: 1
 typo: x
 grants: []`, "not found in type grants.File"},
-		"缺 user":      {`version: 1
+		"缺 user": {`version: 1
 grants:
   - tables: [a.b.c]`, "user"},
-		"空 tables":    {`version: 1
+		"空 tables": {`version: 1
 grants:
   - user: dev-alice
     tables: []`, "tables 为空"},
-		"非法 FQN":     {`version: 1
+		"非法 FQN": {`version: 1
 grants:
   - user: dev-alice
     tables: [bss.payment_db]`, "服务.库.表"},
-		"通配 FQN":     {`version: 1
+		"通配 FQN": {`version: 1
 grants:
   - user: dev-alice
     tables: [bss.*]`, "通配"},
-		"重复表":        {`version: 1
+		"重复表": {`version: 1
 grants:
   - user: dev-alice
     tables: [a.b.c, a.b.c]`, "重复授权"},
-		"空文件":        {``, "EOF"},
+		"空文件": {``, "EOF"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -262,7 +262,8 @@ func TestSyncFullReplace(t *testing.T) {
 	}
 }
 
-// Sync 幂等：同文件反复 apply，结果一致、每次 bump 一次。
+// Sync 幂等：同文件反复 apply 结果一致；零变更不 bump（与 AddGrant/RemoveGrant
+// 的 no-op 纪律一致，不触发无谓热重载）。
 func TestSyncIdempotent(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
@@ -271,16 +272,22 @@ func TestSyncIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	for i := 1; i <= 2; i++ {
-		res, err := Sync(ctx, s, f)
-		if err != nil {
-			t.Fatalf("第 %d 次 Sync: %v", i, err)
-		}
-		if res.Removed != 0 {
-			t.Errorf("第 %d 次 Sync Removed = %d, want 0（无变化）", i, res.Removed)
-		}
-		if res.Revision != int64(i) {
-			t.Errorf("第 %d 次 Sync 后 revision = %d, want %d", i, res.Revision, i)
-		}
+	res1, err := Sync(ctx, s, f)
+	if err != nil {
+		t.Fatalf("第 1 次 Sync: %v", err)
+	}
+	if res1.Added != 3 || res1.Removed != 0 || res1.Revision != 1 {
+		t.Errorf("第 1 次 Sync = %+v, want Added=3 Removed=0 Revision=1", res1)
+	}
+
+	res2, err := Sync(ctx, s, f)
+	if err != nil {
+		t.Fatalf("第 2 次 Sync: %v", err)
+	}
+	if res2.Added != 0 || res2.Removed != 0 {
+		t.Errorf("第 2 次 Sync 净 diff = %+v, want 零变更", res2)
+	}
+	if res2.Revision != 1 {
+		t.Errorf("零变更不应 bump：revision = %d, want 1", res2.Revision)
 	}
 }

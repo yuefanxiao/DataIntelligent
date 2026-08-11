@@ -145,7 +145,7 @@ func TestRevisionBump(t *testing.T) {
 	ctx := context.Background()
 
 	for want := int64(1); want <= 3; want++ {
-		if err := s.BumpPermissionRevision(ctx, nil); err != nil {
+		if err := s.BumpPermissionRevision(ctx); err != nil {
 			t.Fatalf("bump: %v", err)
 		}
 		got, err := s.PermissionRevision(ctx)
@@ -167,7 +167,7 @@ func TestRevisionPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	if err := s1.BumpPermissionRevision(ctx, nil); err != nil {
+	if err := s1.BumpPermissionRevision(ctx); err != nil {
 		t.Fatalf("bump: %v", err)
 	}
 	s1.Close()

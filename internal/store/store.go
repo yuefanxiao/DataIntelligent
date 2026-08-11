@@ -3,8 +3,8 @@
 //
 // WAL 天然给出「单写者 + 多读者」并发模型：写事务在库层串行化，读者不阻塞
 // 写者；备份 = checkpoint + 文件拷贝（07 票）。本包持有全部网关表（`dgw_`
-// 前缀）的 schema——v1 只建凭据表，后续票（02 权限表、07 语义运行时表）在此
-// 追加。
+// 前缀）的 schema——v1 已建凭据表（#18）与权限表（#19：表授权 + 热重载
+// revision），后续 07 语义运行时表在此追加。
 package store
 
 import (
@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS dgw_credentials (
     revoked_at TEXT                  -- NULL = 有效；吊销即时生效
 );
 
--- 表级授权（ADR-0004）：用户 × 表 FQN 扁平白名单，业务数据面唯一授权数据。
+-- 表级授权（ADR-0004 权限模型；存储载体经 ADR-0005 修正为 SQLite）：
+-- 用户 × 表 FQN 扁平白名单，业务数据面唯一授权数据。
 -- FQN = 服务.库.表，与本体 Table 实体同一命名空间；指标/概念授权经编译期
 -- （07 同步管线）展开为具体表行，本表不存通配模式。
 CREATE TABLE IF NOT EXISTS dgw_table_grants (
@@ -119,18 +120,20 @@ func (s *Store) PermissionRevision(ctx context.Context) (int64, error) {
 	return rev, nil
 }
 
-// BumpPermissionRevision 把权限版本号 +1——授权变更（grants 包的增删/编译）必须
-// 与数据写入同一事务调用，网关侧据此触发热重载。
-func (s *Store) BumpPermissionRevision(ctx context.Context, tx *sql.Tx) error {
-	var err error
-	if tx != nil {
-		_, err = tx.ExecContext(ctx,
-			"UPDATE dgw_permission_meta SET revision = revision + 1 WHERE id = 1")
-	} else {
-		_, err = s.db.ExecContext(ctx,
-			"UPDATE dgw_permission_meta SET revision = revision + 1 WHERE id = 1")
+// BumpPermissionRevision 把权限版本号 +1（不经事务，供测试等无事务场景）。
+func (s *Store) BumpPermissionRevision(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE dgw_permission_meta SET revision = revision + 1 WHERE id = 1"); err != nil {
+		return fmt.Errorf("bump permission revision: %w", err)
 	}
-	if err != nil {
+	return nil
+}
+
+// BumpPermissionRevisionTx 在既有事务内把权限版本号 +1——授权变更（grants 包
+// 的增删/编译）必须与数据写入同一事务调用，网关侧据此触发热重载。
+func (s *Store) BumpPermissionRevisionTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE dgw_permission_meta SET revision = revision + 1 WHERE id = 1"); err != nil {
 		return fmt.Errorf("bump permission revision: %w", err)
 	}
 	return nil
