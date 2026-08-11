@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/authz"
+	"github.com/yuefanxiao/DataIntelligent/internal/db"
 	"github.com/yuefanxiao/DataIntelligent/internal/store"
 )
 
@@ -29,14 +31,44 @@ const authzReloadInterval = 5 * time.Second
 
 // Gateway 是一个网关实例：持有运行时存储、授权服务与 MCP server。
 type Gateway struct {
-	store  *store.Store
-	authz  *authz.Service
-	server *mcp.Server
+	store   *store.Store
+	authz   *authz.Service
+	server  *mcp.Server
+	execSQL *executeSQLDeps // execute_sql 运行时依赖（nil = 未配置，结构化拒绝）
 }
 
-// New 构建网关：打开的 store 传入（调用方负责 Close），注册六 stub 工具，
-// 并把表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
-func New(st *store.Store, logger *slog.Logger) (*Gateway, error) {
+// Option 是 New 的可选注入（execute_sql 的 PG 路由与限额，04 票接线）。
+type Option func(*options)
+
+type options struct {
+	execSQL *executeSQLDeps
+}
+
+// executeSQLDeps 是 execute_sql 的运行时依赖：PG 路由 + 行数限额。
+type executeSQLDeps struct {
+	router *db.Router
+	limit  int
+}
+
+// 行数限额范围（spec §4.9 参数表：默认 500 / 硬上限 5000）。
+const (
+	sqlLimitDefault = 500
+	sqlLimitMax     = 5000
+)
+
+// WithExecuteSQL 注入 execute_sql 的 PG 路由与行数限额（spec §4.9「env 可
+// 覆盖」：默认 500，硬上限 5000 不可配置超过）。未调用时 execute_sql 返回
+// 结构化「未配置」错误（fail closed，不静默降级）。
+func WithExecuteSQL(router *db.Router, limit int) Option {
+	return func(o *options) {
+		o.execSQL = &executeSQLDeps{router: router, limit: limit}
+	}
+}
+
+// New 构建网关：打开的 store 传入（调用方负责 Close），注册六工具，并把
+// 表授权快照加载进内存（失败 = 启动失败——权限加载不完整绝不能带病服务）。
+// 限额越界（<500 或 >5000）= 启动失败（配置错误 fail fast）。
+func New(st *store.Store, logger *slog.Logger, opts ...Option) (*Gateway, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    implName,
 		Version: implVersion,
@@ -47,10 +79,22 @@ func New(st *store.Store, logger *slog.Logger) (*Gateway, error) {
 	})
 
 	g := &Gateway{store: st, server: server, authz: authz.New(st, logger)}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	g.execSQL = o.execSQL
+	if g.execSQL != nil && g.execSQL.router == nil {
+		return nil, fmt.Errorf("WithExecuteSQL 需要非 nil 的 PG 路由（db.NewRouter 构造）")
+	}
+	if g.execSQL != nil && (g.execSQL.limit < sqlLimitDefault || g.execSQL.limit > sqlLimitMax) {
+		return nil, fmt.Errorf("SQL 行数限额 %d 越界（范围 %d-%d，spec §4.9）", g.execSQL.limit, sqlLimitDefault, sqlLimitMax)
+	}
+
 	if err := g.authz.Load(context.Background()); err != nil {
 		return nil, err
 	}
-	registerTools(server)
+	registerTools(server, g)
 	return g, nil
 }
 

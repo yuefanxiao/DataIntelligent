@@ -44,6 +44,7 @@ type listEnumValuesInput struct {
 
 type executeSQLInput struct {
 	SQL    string `json:"sql" jsonschema:"只读 SQL（仅 SELECT；行数默认上限 500 / 硬上限 5000，超限截断 + truncated 标记）"`
+	DBName string `json:"dbname,omitempty" jsonschema:"目标数据库（dbname 路由；配置单库时缺省推断，多库时必填）"`
 	PlanID string `json:"plan_id,omitempty" jsonschema:"溯源透传字段（v1 不校验；v2 规划引擎启用后关联查询计划）"`
 }
 
@@ -70,7 +71,7 @@ func readOnly() *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true}
 }
 
-func registerTools(s *mcp.Server) {
+func registerTools(s *mcp.Server, g *Gateway) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_entities",
 		Description: "双入口关键词检索：按业务概念或指标定位实体（关键词+向量 RRF 混合，≤20 条 + total）。",
@@ -103,7 +104,7 @@ func registerTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "execute_sql",
-		Description: "执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记）。",
+		Description: "执行只读 SQL（经校验层四段链：AST 分类 → 表授权 → 物理边界 → 限额包层；结果有界 + truncated 标记；dbname 指定目标库）。",
 		Annotations: readOnly(),
-	}, stub[executeSQLInput]("execute_sql"))
+	}, g.handleExecuteSQL)
 }
