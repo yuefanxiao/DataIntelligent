@@ -15,13 +15,15 @@ dgw-collect scan --repo ~/cloud/neo-cloud \
 
 退出码：`0` = 门禁全过；`2` = 有 error 级发现（**草稿照写**，交人确认）；`1` = 操作失败（未产出）。
 
+清单里不配 `db` 的服务（纯编排/聚合/事件采集类，如 ops-operation / dashboard-backend / usage-collection）= 无持库服务：只产出服务实体草稿（无表结构），保证语义层覆盖全部后端服务。
+
 **2. 引导人工 review**：
 
 ```sh
-git -C <clone> diff          # 自查草稿（会覆盖同名服务文件）
+git -C <clone> diff          # 自查草稿（结构以新采集为准）
 ```
 
-语义内容（描述/业务概念/指标口径/枚举含义）Agent 起草 + 服务负责人确认后回写（US-15/16）；纯结构变更走批量确认（US-16，PR review 形态）。
+语义内容（描述/业务概念/指标口径/枚举含义）Agent 起草 + 服务负责人确认后回写（US-15/16）；纯结构变更走批量确认（US-16，PR review 形态）。**重跑采集不覆盖已确认语义**：`services/*.yaml` 的语义字段（description / is_time / 枚举 label）按 FQN 合并保留，diff 里只剩结构变化（ADR-0007「结构自动、语义人工」）。
 
 **3. 合入**（git review 闸门：commit 即版本）：
 
