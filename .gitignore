@@ -22,3 +22,7 @@ node_modules/
 deploy/config/env
 deploy/demo/.env
 deploy/demo/run/
+
+# demo 运行产物（执行记录/运行时存储）
+deploy/demo/logs/
+deploy/demo/dgw.db*
