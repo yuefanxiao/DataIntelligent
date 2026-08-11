@@ -119,8 +119,12 @@ echo "==> [4/9] 构建 dgw + accept 二进制..."
 ( cd ../.. && go build -o "$DGWBIN" ./cmd/dgw && go build -o "$ACCEPT" ./deploy/accept )
 
 echo "==> [5/9] 凭据 + 授权（key-create 明文仅打印一次，不落日志）..."
-create_key() { # $1=user；输出明文 key
-  DGW_EXEC_LOG_DIR="$TMP/keylog" "$DGWBIN" key-create --user "$1" --db "$TMP/dgw.db" | tail -1
+create_key() { # $1=user；输出明文 key；key-create 失败即退出（不吞退出码）。
+  # key 生命周期记录落 $TMP/keylog（不污染网关日志目录）。
+  local out
+  out="$(DGW_EXEC_LOG_DIR="$TMP/keylog" "$DGWBIN" key-create --user "$1" --db "$TMP/dgw.db" 2>"$TMP/key-create.err")" \
+    || { echo "key-create $1 失败（详见 $TMP/key-create.err）" >&2; exit 1; }
+  printf '%s\n' "$out" | tail -1
 }
 KEY_MAIN="$(create_key dev-alice)"
 KEY_GHOST="$(create_key ghost)"
@@ -180,6 +184,8 @@ if "$ACCEPT" --mode http --addr "$HTTP_URL" --keys "$KEYS" --cases cases.yaml \
 else
   fail "HTTP 重放失败（报告：$REPORT_DIR/accept-$STAMP-http.md）"
 fi
+# 报告是验收证据的留档：断言全过但报告缺失 = 证据不完整，判失败。
+test -s "$REPORT_DIR/accept-$STAMP-http.md" || fail "HTTP 报告缺失或为空"
 if "$ACCEPT" --mode http --addr "$HTTP_URL" --keys "$KEYS" --cases cases.yaml \
     --replay-from "$REPORT_DIR/accept-$STAMP-http.md.chain.jsonl" \
     --report "$REPORT_DIR/accept-$STAMP-http-replay.md" --timeout 90s; then
@@ -187,6 +193,7 @@ if "$ACCEPT" --mode http --addr "$HTTP_URL" --keys "$KEYS" --cases cases.yaml \
 else
   fail "HTTP 重放复现失败（报告：$REPORT_DIR/accept-$STAMP-http-replay.md）"
 fi
+test -s "$REPORT_DIR/accept-$STAMP-http-replay.md" || fail "HTTP 重放报告缺失或为空"
 kill "$GW_PID" 2>/dev/null || true
 trap - EXIT
 
@@ -202,6 +209,7 @@ if "$ACCEPT" --mode stdio --dgw-bin "$DGWBIN" --stdio-user dev-alice --keys "$KE
 else
   fail "stdio 重放失败（报告：$REPORT_DIR/accept-$STAMP-stdio.md）"
 fi
+test -s "$REPORT_DIR/accept-$STAMP-stdio.md" || fail "stdio 报告缺失或为空"
 if "$ACCEPT" --mode stdio --dgw-bin "$DGWBIN" --stdio-user dev-alice --keys "$KEYS" \
     --cases cases.yaml --replay-from "$REPORT_DIR/accept-$STAMP-stdio.md.chain.jsonl" \
     --report "$REPORT_DIR/accept-$STAMP-stdio-replay.md" --timeout 90s; then
@@ -209,6 +217,7 @@ if "$ACCEPT" --mode stdio --dgw-bin "$DGWBIN" --stdio-user dev-alice --keys "$KE
 else
   fail "stdio 重放复现失败（报告：$REPORT_DIR/accept-$STAMP-stdio-replay.md）"
 fi
+test -s "$REPORT_DIR/accept-$STAMP-stdio-replay.md" || fail "stdio 重放报告缺失或为空"
 
 echo "==> [9/9] 收尾..."
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" down >/dev/null 2>&1 || true

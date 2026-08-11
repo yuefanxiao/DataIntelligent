@@ -65,6 +65,20 @@ stdio = 单 key 单进程（`serve-stdio` 的架构约束）：多身份用例�
 （顺序重放无法复现并发拒绝——闸在时间窗口内饱和；执行记录仍在链上，
 完整性照查）。
 
+## 方案取舍（为何不是其他形态）
+
+| 候选 | 排除理由 |
+|---|---|
+| go test 包（`go test ./accept/...`） | 验收 = 四趟运行（http/stdio × 主运行/重放）+ 报告留档，需要进程级退出码契约与报告产物；go test 的缓存/副作用语义会打架。主 seam 是协议层真实往返，不是单元测试 |
+| shell 断言 | 逐列类型归一化对照（big.Rat/timestamptz 布局/jsonb 语义相等）、并发多集、JSONL 匹配在 shell 里不可实现；shell 只做编排（run.sh），断言留在 Go |
+| Go 代码内嵌用例 | build 14 的 39+ 用例矩阵是数据不是代码；用例兼作 golden 语料（§6.2），YAML 可被采集回归直接复用 |
+| 直接跑真实 ~/cloud/neo-cloud | 生产凭证/拓扑不进验收环境；用 demo 主从 PG + 伪造数据（orders/big_events/users），形态与生产一致（共享只读角色、从库、statement_timeout），数字可验证 |
+
+**与 mcp-ping 的关系**（issue #10 交 #29 收敛）：`deploy/demo/mcp-ping.go`
+保留为 demo 的单发探针（setup.sh 冒烟用，一次一查询）；验收职责由本框架
+承接（用例重放 + 三件套 + 报告）。两者共用同一 go-sdk 客户端接线（bearer
+transport 三行样板，不抽公共包——demo 与验收是不同目录的独立 main）。
+
 ## 加用例（build 14 矩阵）
 
 编辑 `cases.yaml` 增条目即可，harness 不改。字段见文件头注释；要点：

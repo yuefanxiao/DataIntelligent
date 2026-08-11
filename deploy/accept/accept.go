@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -1060,6 +1061,10 @@ func runPSQL(cfg config, dbname, sql string) ([][]string, error) {
 // compareCell 按列类型做单元格归一化对照；返回 "" = 一致，否则为差异描述。
 // 类型覆盖 = 验收用例实际出现的类型（int/numeric/text/timestamptz 等）；
 // 未覆盖类型走严格字符串对照（宁可报失败也不静默放行——矩阵作者可见）。
+//
+// 已知边界：psql CSV 无法区分 NULL 与空字符串（都渲染为空字段）——数据
+// 含空字符串时对照报不一致（假失败方向，安全）；用例作者避免对照含空串
+// 的列，或先 COALESCE。
 func compareCell(colType, psql string, gw any) string {
 	psql = strings.TrimSpace(psql)
 	switch {
@@ -1267,30 +1272,42 @@ func readJSONLAll(dir string, since time.Time) ([]jsonlRecord, error) {
 		if err != nil {
 			return nil, err
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
+		// 逐行读用 bufio.Reader（无行长度上限）：Scanner 放宽上限仍会把
+		// 超长行（execute_sql 的 SQL 原文无长度上限；stdio 形态可达）变成
+		// 硬失败——与网关聚合器（execrecord.aggregateFile）同一理由。
+		r := bufio.NewReaderSize(f, 64*1024)
+		for {
+			line, rerr := r.ReadBytes('\n')
+			if len(line) > 0 {
+				rec := parseJSONLLine(line)
+				if rec != nil {
+					if !since.IsZero() && rec.TS.Before(since) {
+						continue
+					}
+					all = append(all, *rec)
+				}
 			}
-			var rec jsonlRecord
-			if err := json.Unmarshal([]byte(line), &rec); err != nil {
-				continue // 坏行跳过（与聚合器同一策略：尽力而为）
+			if rerr != nil {
+				if rerr == io.EOF {
+					break
+				}
+				f.Close()
+				return nil, fmt.Errorf("读执行记录 %s: %w", e.Name(), rerr)
 			}
-			if !since.IsZero() && rec.TS.Before(since) {
-				continue
-			}
-			all = append(all, rec)
-		}
-		if err := sc.Err(); err != nil {
-			f.Close()
-			return nil, err
 		}
 		f.Close()
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].TS.Before(all[j].TS) })
 	return all, nil
+}
+
+// parseJSONLLine 解析一行执行记录（坏行跳过——与聚合器同一策略：尽力而为）。
+func parseJSONLLine(line []byte) *jsonlRecord {
+	var rec jsonlRecord
+	if json.Unmarshal(line, &rec) != nil {
+		return nil
+	}
+	return &rec
 }
 
 // writeChain 把调用链快照写成 <report>.chain.jsonl（重放复现的输入：只含
@@ -1328,22 +1345,25 @@ func readReplayChain(path string) ([]jsonlRecord, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// 链文件是 harness 自己写的快照：坏行是证据损坏，显式失败（不静默
+	// 丢弃——丢行会让重放「少跑记录仍 PASS」）。
 	var chain []jsonlRecord
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	r := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			rec := parseJSONLLine(line)
+			if rec == nil {
+				return nil, fmt.Errorf("链文件 %s 含坏行（前 %d 条已读）: %q", path, len(chain), strings.TrimSpace(string(line)))
+			}
+			chain = append(chain, *rec)
 		}
-		var rec jsonlRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("读链文件 %s: %w", path, rerr)
 		}
-		chain = append(chain, rec)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
 	}
 	return chain, nil
 }
@@ -1407,7 +1427,7 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 			}
 			grec := recs[:need]
 			recs = recs[need:]
-			if !matchGroup(grec, o) {
+			if !matchGroup(grec, group, o) {
 				fails = append(fails, fmt.Sprintf("%s：记录与观测不一致", p.Label))
 			}
 			expPerm += exp * need
@@ -1454,6 +1474,12 @@ func checkJSONL(plans []callPlan, obsList []obs, all []jsonlRecord) jsonlCheck {
 			if rec.Reject != nil && rec.Reject.Kind == gwerr.KindPermission {
 				permDenied++
 			}
+		case execrecord.StatusTimeout:
+			// 状态契约里有超时/解析失败（spec §4.6）；本套用例不期望它们
+			// 出现——显式命名失败原因，不归入「未知状态」。
+			fails = append(fails, "记录状态 timeout（本套用例不应出现）")
+		case execrecord.StatusParseError:
+			fails = append(fails, "记录状态 parse_error（本套用例不应出现）")
 		default:
 			fails = append(fails, fmt.Sprintf("未知状态 %q", rec.Status))
 		}
@@ -1516,8 +1542,23 @@ func matchRecord(rec jsonlRecord, o obs) bool {
 	return true
 }
 
-// matchGroup 并发组多集对照（组内顺序不保证；按 (user,status) 计数）。
-func matchGroup(recs []jsonlRecord, obs []obs) bool {
+// matchGroup 并发组多集对照（组内顺序不保证）——与顺序路径同等级忠实度：
+//   - 组内全部记录与组计划同工具同参数（组 = 同一用例的重复调用）；
+//   - execute_sql 成功记录必须带行数/截断（记录契约完整）；
+//   - (user,status) 多集与观测相等（身份与状态分布逐项）。
+func matchGroup(recs []jsonlRecord, plans []callPlan, obs []obs) bool {
+	want := plans[0]
+	for _, r := range recs {
+		params, _ := r.Params.(map[string]any)
+		if r.Tool != want.Tool || !canonEqual(params, want.Args) {
+			return false
+		}
+		if r.Status == execrecord.StatusSuccess && want.Tool == "execute_sql" {
+			if r.Rows == nil || r.Truncated == nil {
+				return false
+			}
+		}
+	}
 	type key struct{ user, status string }
 	recCount := map[key]int{}
 	for _, r := range recs {
@@ -1622,6 +1663,11 @@ func runReplay(cfg config, cf *caseFile, report *report) error {
 		results = append(results, r)
 	}
 	report.addReplay(results, replayed, skipped)
+	// 完整性：重放 + 跳过必须等于链长度（链文件坏行已在读取时拒绝；这里
+	// 兜底防「少跑记录仍 PASS」）。
+	if replayed+skipped != len(chain) {
+		return fmt.Errorf("重放不完整：重放 %d + 跳过 %d != 链 %d 条", replayed, skipped, len(chain))
+	}
 	if !report.concludeReplay() {
 		return fmt.Errorf("重放存在不一致（详见报告 %s）", cfg.reportPath)
 	}
@@ -1877,11 +1923,24 @@ func loadCases(path string) (*caseFile, error) {
 		if len(c.Modes) == 0 {
 			return nil, fmt.Errorf("用例 %s 缺 modes", c.ID)
 		}
-		if c.Concurrency > 0 && (c.Tool == "" || c.Args == nil) {
-			return nil, fmt.Errorf("用例 %s：concurrency 需要 tool+args", c.ID)
+		if c.Concurrency > 1 {
+			// 并发用例 = 独立会话同时发出 + 多集断言；缺 replay_skip 会
+			// 退化成串行执行（闸从不饱和），失败信息误导为多集不符。
+			if !c.ReplaySkip {
+				return nil, fmt.Errorf("用例 %s：concurrency>1 需要 replay_skip（顺序重放无法复现并发拒绝）", c.ID)
+			}
+			if c.Tool == "" || c.Args == nil {
+				return nil, fmt.Errorf("用例 %s：concurrency 需要 tool+args", c.ID)
+			}
+			if len(c.SQLs) > 0 || len(c.Steps) > 0 {
+				return nil, fmt.Errorf("用例 %s：concurrency 与 sqls/steps 互斥", c.ID)
+			}
 		}
 		if c.Concurrency == 0 && c.Tool == "" && len(c.Steps) == 0 {
 			return nil, fmt.Errorf("用例 %s 无调用内容", c.ID)
+		}
+		if len(c.SQLs) > 0 && c.Tool == "" {
+			return nil, fmt.Errorf("用例 %s：sqls 需要 tool", c.ID)
 		}
 	}
 	return &cf, nil
