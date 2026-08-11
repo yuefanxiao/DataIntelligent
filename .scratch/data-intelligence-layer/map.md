@@ -38,10 +38,11 @@
 
 - [11 部署拓扑：本地起步、接从库、高可用](https://github.com/yuefanxiao/DataIntelligent/issues/12) — 双传输实现（Streamable HTTP 为主 + bearer token 认证、stdio 调试形态；并发闸按守护进程语义，数值归 12）；部署位 = **内部开发机单机 Docker**（不进生产集群：SQLite/logs/env 三 volume、restart 兜底），数据库凭证仅存该机 env 文件、开发机零凭证；从库连接 = **可配置 DSN 口子** + dbname 路由（生产网络通路方案生产部署时定）；DB 角色 = 专用共享只读角色、**provisioning 开发自建**（服务器 root/kubectl 取 CNPG postgres 超管建角色）、网关永不超管；执行记录 JSONL = 网关机本地 volume；采集器保留 = 手动 on-demand 无轮询 + 采集工作流 Skill 记 v1 交付物；数据新鲜度 = 接受从库延迟 + 启动自检（pg_is_in_recovery + 角色级 statement_timeout，不过拒启）；监控/告警、正式上线回滚流程 = 后续优化项。解封 12；输出 12（交付物清单、数值按守护进程语义）；ADR-0009。
 - [12 阶段切分与 v1 验收标准（最小闭环）](https://github.com/yuefanxiao/DataIntelligent/issues/13) — 时序 = v1 全服务最小闭环构建先行 → spec+phase plan（docs/spec.md）→ 团队评审（PR + 30min demo，意见清零+拍板）→ 阶段 2-4；v1 = 13 服务全量（~/cloud/neo-cloud，结构自动+语义人工确认全服务，交付物清单含采集工作流 Skill/golden 语料/验收套件）、负载防护 = 每 key 2/进程级 8/statement_timeout 30s（可配）、限额 500/5000；验收 = 主用例「昨天支付失败率为什么上涨」全流程 + 每服务 ≥2 简单+≥1 复杂 + 负向/边界 5 例（无 grants 测试用户），判定三件套（psql 对照/执行记录可复现/零未授权），用例兼作 golden 语料、v1 后按效果迭代；阶段 2=运营化（Gitea 触发/校准·drift 例行/监控告警+复制延迟/生产通路全团队接入）、阶段 3=能力深化（v2 规划引擎/权限优化/工作台管理面/采集源扩展）、阶段 4=工作台+开放（内置 Agent 界面、PM 接入、MCP/Skill 并存；编排形态阶段 3 末定）；里程碑制无日期；输出 14（v1 构建 task 票）；ADR-0010。
+- [14 v1 最小完整闭环：spec 先行（docs/spec.md）](https://github.com/yuefanxiao/DataIntelligent/issues/15) — 拍板人 2026-08-11 改口执行序为 spec 先行（ADR-0010 修正横幅，其余原样）；v1 全量规格产出（四件套：SQLite 语义层/校验层四段链/双表面权限/执行记录 JSONL；参数表 2/8/30s/500-5000；验收 = 主用例 + 13 服务矩阵 + 负向 5 例 + 判定三件套），PR #16 合入 main；构建实施（网关/同步/采集/权限/验收套件）= 评审通过后开新票。
 
 ## Not yet specified
 
-- 阶段 2-4 入口评审时开票（12 已定排期）：v2 规划引擎选型（10 接口冻结）、权限优化（列级/掩码/RLS/key 过期）、工作台管理面、Gitea 触发采集、监控/告警 + OTel、校准例行化、API 定义采集、neo-cloud 之外采集源扩展、复制延迟监测、生产网络通路（NodePort/port-forward/LB）
+- 阶段 2-4 入口评审时开票（12 已定排期）：v1 构建实施票（#15 剩余交付物，评审通过后开）、v2 规划引擎选型（10 接口冻结）、权限优化（列级/掩码/RLS/key 过期）、工作台管理面、Gitea 触发采集、监控/告警 + OTel、校准例行化、API 定义采集、neo-cloud 之外采集源扩展、复制延迟监测、生产网络通路（NodePort/port-forward/LB）
 - 内置 Agent 编排形态（自研 vs 接现成，如 Claude Code 网页版/LangGraph）——12 已定阶段 3 末再定
 
 ## Out of scope
