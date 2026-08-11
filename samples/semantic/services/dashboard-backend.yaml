@@ -1,0 +1,4 @@
+version: 1
+service: dashboard-backend
+description: 工作台 BFF——聚合 iam/bss/通知/工单数据的聚合网关（无持库）
+databases: []

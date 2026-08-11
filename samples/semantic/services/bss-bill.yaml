@@ -1,0 +1,354 @@
+version: 1
+service: bss-bill
+description: 计费服务——用量计费与账单：账单明细、结算批次与扣费重试
+databases:
+  - name: bill
+    description: 计费库（schema bill，TimescaleDB 按 request_started_at 分区）——用量账单与结算
+    tables:
+      - name: bill_lookup
+        description: 账单 ID 定位表——bill_id → 分区表行定位
+        schema: bill
+        columns:
+          - name: bill_id
+            type: varchar(64)
+          - name: bill_row_id
+            type: bigint
+          - name: request_started_at
+            type: timestamptz
+          - name: org_id
+            type: varchar(36)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: bill_summary_hourly
+        description: 小时聚合汇总——按组织/用户/API 凭据/模型聚合的用量与金额
+        schema: bill
+        columns:
+          - name: bucket_started_at
+            type: timestamptz
+            is_time: true
+          - name: org_id
+            type: varchar(36)
+          - name: user_id
+            type: varchar(36)
+          - name: api_key_id
+            type: varchar(36)
+          - name: model
+            type: varchar(128)
+          - name: unit
+            type: varchar(32)
+          - name: currency
+            type: char(3)
+          - name: quantity
+            type: numeric(30,12)
+          - name: total_cost
+            type: numeric(30,12)
+          - name: discount_amount
+            type: numeric(30,12)
+          - name: voucher_amount
+            type: numeric(30,12)
+          - name: bill_amount
+            type: numeric(30,12)
+          - name: bill_count
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: bills
+        description: 账单明细——每次用量计费生成的账单行（主用例下钻归因的用量侧）
+        schema: bill
+        columns:
+          - name: id
+            type: bigint
+          - name: bill_id
+            type: varchar(64)
+          - name: source_event_id
+            type: varchar(64)
+          - name: source_event_line_no
+            type: smallint
+          - name: org_id
+            type: varchar(36)
+            description: 组织 ID
+          - name: user_id
+            type: varchar(36)
+            description: 使用用户 ID
+          - name: api_key_id
+            type: varchar(36)
+            description: API 凭据 ID（关联 iam api_credentials）
+          - name: api_key_name
+            type: varchar(255)
+          - name: request_id
+            type: varchar(64)
+          - name: model
+            type: varchar(128)
+            description: 模型名
+          - name: meter
+            type: smallint
+            description: 计费计量项
+          - name: meter_name
+            type: varchar(64)
+          - name: meter_key
+            type: varchar(256)
+          - name: quantity
+            type: numeric(30,12)
+            description: 用量数量
+          - name: unit
+            type: varchar(32)
+          - name: unit_price
+            type: numeric(30,12)
+            description: 单价
+          - name: price_version_id
+            type: bigint
+          - name: total_cost
+            type: numeric(30,12)
+          - name: discount_amount
+            type: numeric(30,12)
+          - name: voucher_amount
+            type: numeric(30,12)
+          - name: bill_amount
+            type: numeric(30,12)
+            description: 账单金额（扣折扣/代金券后）
+          - name: currency
+            type: char(3)
+          - name: request_started_at
+            type: timestamptz
+            description: 请求开始时间（账单时间轴，分区键）
+            is_time: true
+          - name: request_finished_at
+            type: timestamptz
+          - name: billed_at
+            type: timestamptz
+            description: 计费时间
+          - name: settlement_cycle_started_at
+            type: timestamptz
+          - name: settlement_batch_id
+            type: varchar(64)
+          - name: wallet_transaction_id
+            type: varchar(64)
+            description: 关联钱包流水单号
+          - name: settled_at
+            type: timestamptz
+            description: 结算时间
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: export_operations
+        description: 账单导出任务（异步 CSV 导出）
+        schema: bill
+        columns:
+          - name: id
+            type: bigint
+          - name: operation_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(36)
+          - name: user_id
+            type: varchar(36)
+          - name: target_kind
+            type: smallint
+          - name: mode
+            type: smallint
+          - name: status
+            type: smallint
+          - name: filter_snapshot
+            type: jsonb
+          - name: range_started_at
+            type: timestamptz
+          - name: range_ended_at
+            type: timestamptz
+          - name: estimated_rows
+            type: bigint
+          - name: row_count
+            type: bigint
+          - name: file_url
+            type: varchar(1024)
+          - name: file_size_bytes
+            type: bigint
+          - name: error_code
+            type: varchar(64)
+          - name: error_message
+            type: text
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+          - name: started_at
+            type: timestamptz
+          - name: finished_at
+            type: timestamptz
+          - name: expires_at
+            type: timestamptz
+          - name: oss_object_key
+            type: varchar(512)
+          - name: oss_content_type
+            type: varchar(128)
+          - name: filter_hash
+            type: varchar(64)
+          - name: lease_until
+            type: timestamptz
+          - name: owner_token
+            type: varchar(64)
+          - name: file_name
+            type: varchar(512)
+      - name: org_consumption
+        description: 组织累计消费——生命周期消费金额与水位
+        schema: bill
+        columns:
+          - name: org_id
+            type: varchar(36)
+          - name: lifetime_amount
+            type: numeric(30,12)
+          - name: last_emitted_lifetime_amount
+            type: numeric(30,12)
+          - name: last_emitted_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: first_consumed_at
+            type: timestamptz
+          - name: first_consumption_event_emitted_at
+            type: timestamptz
+      - name: settlement_attempts
+        description: 结算扣费尝试——每次钱包扣费 RPC 的尝试记录（扣费失败归因）
+        schema: bill
+        columns:
+          - name: id
+            type: bigint
+          - name: settlement_batch_id
+            type: varchar(64)
+            description: 关联结算批次
+          - name: attempt_no
+            type: int
+          - name: trigger_type
+            type: varchar(32)
+            description: 触发方式（调度器/兜底/人工）
+            enum_values:
+              - value: dispatcher
+                label: 调度器
+              - value: manual
+                label: 人工
+              - value: rescue
+                label: 兜底重试
+          - name: status
+            type: varchar(32)
+            description: 尝试状态
+            enum_values:
+              - value: blocked
+                label: 阻塞
+              - value: failed
+                label: 失败
+              - value: failed_manual
+                label: 人工介入失败
+              - value: retrying
+                label: 重试中
+              - value: started
+                label: 已开始
+              - value: succeeded
+                label: 成功
+          - name: wallet_transaction_id
+            type: varchar(64)
+          - name: request_amount
+            type: numeric(30,12)
+          - name: bill_count
+            type: bigint
+          - name: error_code
+            type: varchar(64)
+            description: 扣费错误码
+          - name: error_message
+            type: text
+            description: 扣费错误信息
+          - name: request_digest
+            type: varchar(128)
+          - name: response_digest
+            type: varchar(128)
+          - name: rpc_started_at
+            type: timestamptz
+          - name: rpc_finished_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+            is_time: true
+          - name: updated_at
+            type: timestamptz
+      - name: settlement_batches
+        description: 结算批次——组织结算周期与扣费结果
+        schema: bill
+        columns:
+          - name: id
+            type: bigint
+          - name: settlement_batch_id
+            type: varchar(64)
+          - name: org_id
+            type: varchar(36)
+            description: 组织 ID
+          - name: settlement_cycle_started_at
+            type: timestamptz
+            description: 结算周期开始
+            is_time: true
+          - name: settlement_cycle_ended_at
+            type: timestamptz
+            description: 结算周期结束
+          - name: amount
+            type: numeric(30,12)
+            description: 结算金额
+          - name: currency
+            type: char(3)
+          - name: bill_count
+            type: bigint
+          - name: status
+            type: varchar(32)
+            description: 批次状态
+            enum_values:
+              - value: blocked
+                label: 阻塞
+              - value: collecting
+                label: 归集中
+              - value: failed_manual
+                label: 人工介入失败
+              - value: processing
+                label: 处理中
+              - value: ready
+                label: 就绪
+              - value: retrying
+                label: 重试中
+              - value: settled
+                label: 已结算
+          - name: blocked_reason
+            type: varchar(64)
+          - name: reference_type
+            type: varchar(32)
+          - name: reference_id
+            type: varchar(128)
+          - name: idempotency_key
+            type: varchar(128)
+          - name: wallet_transaction_id
+            type: varchar(64)
+            description: 关联钱包流水单号
+          - name: first_attempted_at
+            type: timestamptz
+          - name: last_attempted_at
+            type: timestamptz
+          - name: settled_at
+            type: timestamptz
+          - name: attempt_count
+            type: int
+          - name: last_error_code
+            type: varchar(64)
+          - name: last_error_message
+            type: text
+          - name: next_action_at
+            type: timestamptz
+          - name: processing_owner
+            type: varchar(128)
+          - name: processing_deadline_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: batch_sequence
+            type: integer

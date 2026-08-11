@@ -1,0 +1,136 @@
+version: 1
+service: iam-audit
+description: 审计服务——平台操作审计日志
+databases:
+  - name: iam_audit
+    description: 审计库（public schema，TimescaleDB 按 occurred_at 分区）
+    tables:
+      - name: audit_exports
+        description: 审计导出任务
+        columns:
+          - name: id
+            type: bigserial
+          - name: export_id
+            type: varchar(64)
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: FAILED
+                label: 失败
+              - value: PENDING
+                label: 待处理
+              - value: RUNNING
+                label: 运行中
+              - value: SUCCEEDED
+                label: 成功
+          - name: requested_by
+            type: varchar(128)
+          - name: actor_scope
+            type: varchar(16)
+          - name: modules
+            type: jsonb
+          - name: event_type
+            type: varchar(128)
+          - name: actor_id
+            type: varchar(128)
+          - name: user_id
+            type: varchar(128)
+          - name: q
+            type: varchar(256)
+          - name: start_time
+            type: timestamptz
+          - name: end_time
+            type: timestamptz
+          - name: filter_hash
+            type: varchar(64)
+          - name: row_count
+            type: bigint
+          - name: object_key
+            type: text
+          - name: error
+            type: text
+          - name: lease_until
+            type: timestamptz
+          - name: owner_token
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: finished_at
+            type: timestamptz
+      - name: audit_logs
+        description: 审计日志——平台操作事件（登录/充值/管理等）
+        columns:
+          - name: id
+            type: bigserial
+          - name: event_id
+            type: varchar(64)
+          - name: event_type
+            type: varchar(128)
+            description: 事件类型（如 user.login_failed、wallet.recharge）
+          - name: schema_version
+            type: int
+          - name: service
+            type: varchar(64)
+          - name: actor_id
+            type: varchar(128)
+            description: 操作者 ID
+          - name: actor_type
+            type: varchar(16)
+            description: 操作者类型
+            enum_values:
+              - value: admin
+                label: 管理员
+              - value: system
+                label: 系统
+              - value: user
+                label: 用户
+          - name: actor_name
+            type: varchar(128)
+          - name: actor_account
+            type: varchar(128)
+          - name: org_id
+            type: varchar(64)
+            description: 组织 ID
+          - name: user_id
+            type: varchar(128)
+          - name: resource_type
+            type: varchar(64)
+            description: 资源类型
+          - name: resource_id
+            type: varchar(128)
+            description: 资源 ID
+          - name: status
+            type: varchar(16)
+          - name: amount
+            type: varchar(64)
+          - name: workflow_id
+            type: varchar(64)
+          - name: request_id
+            type: varchar(64)
+          - name: ip_address
+            type: varchar(64)
+          - name: user_agent
+            type: varchar(512)
+          - name: module
+            type: varchar(64)
+          - name: session_id
+            type: varchar(64)
+          - name: archive_status
+            type: varchar(32)
+            enum_values:
+              - value: ACTIVE
+                label: 活跃
+              - value: ARCHIVED
+                label: 已归档
+              - value: ARCHIVE_PENDING
+                label: 待归档
+          - name: metadata
+            type: jsonb
+          - name: display_id
+            type: varchar(64)
+          - name: occurred_at
+            type: timestamptz
+            description: 事件发生时间（时间轴，分区键）
+            is_time: true
+          - name: created_at
+            type: timestamptz

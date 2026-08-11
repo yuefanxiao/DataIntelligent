@@ -112,17 +112,11 @@ func reconcileDrafts(outDir string, m *Manifest) error {
 }
 
 // collectService 采集一个服务：解析迁移 → 交叉验证 → 写草稿。
+// 无持库服务（清单未配置 db）跳过结构解析，只产出服务实体草稿。
 func collectService(cfg CollectConfig, ms *ManifestService) (*ServiceResult, error) {
-	st, findings, err := ParseServiceMigrations(ms, cfg.Repo)
+	st, findings, err := structureFor(ms, cfg)
 	if err != nil {
 		return nil, err
-	}
-	findings = append(findings, unresolvedRefFindings(st)...)
-
-	if cfg.GORM {
-		models, gormFindings := ExtractGormModels(filepath.Join(ms.ServiceDir(cfg.Repo), ms.ModelsDir))
-		findings = append(findings, gormFindings...)
-		findings = append(findings, CrossCheck(st, models)...)
 	}
 
 	sr := &ServiceResult{Name: ms.Name, DB: ms.DB, Findings: findings}
@@ -141,6 +135,31 @@ func (r *ServiceResult) PrintFindings() int {
 		fmt.Printf("  %s\n", f.String())
 	}
 	return r.Errors()
+}
+
+// structureFor 产出服务的结构中间态 + 交叉验证发现。
+// 无持库服务（清单未配置 db，纯编排/聚合/事件采集类）没有迁移可
+// 解析——返回空结构（无表）并给一条 warn 提示；有持库服务走完整
+// 链路：迁移解析 → 引用边检查 → GORM 交叉验证。
+func structureFor(ms *ManifestService, cfg CollectConfig) (*Structure, []Finding, error) {
+	if ms.DB == "" {
+		return &Structure{Service: ms.Name}, []Finding{{
+			Source:   SourceManifest,
+			Severity: SeverityWarn,
+			Message:  "服务无持库（清单未配置 db）：仅产出服务实体草稿，无表结构",
+		}}, nil
+	}
+	st, findings, err := ParseServiceMigrations(ms, cfg.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	findings = append(findings, unresolvedRefFindings(st)...)
+	if cfg.GORM {
+		models, gormFindings := ExtractGormModels(filepath.Join(ms.ServiceDir(cfg.Repo), ms.ModelsDir))
+		findings = append(findings, gormFindings...)
+		findings = append(findings, CrossCheck(st, models)...)
+	}
+	return st, findings, nil
 }
 
 // ParseServiceMigrations 是「按清单条目解析一个服务的迁移」的共享入口

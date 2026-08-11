@@ -1,0 +1,202 @@
+version: 1
+service: ops-ticket
+description: 工单服务——客户支持工单（飞书表单接入）
+databases:
+  - name: ops_ticket
+    description: 工单库（public schema）——工单与表单接入
+    tables:
+      - name: support_ticket_feishu_events
+        description: 飞书事件——表单提交事件同步
+        columns:
+          - name: id
+            type: VARCHAR(36)
+          - name: source_id
+            type: VARCHAR(36)
+          - name: event_id
+            type: VARCHAR(255)
+          - name: event_type
+            type: VARCHAR(100)
+          - name: record_id
+            type: VARCHAR(255)
+          - name: action
+            type: VARCHAR(50)
+          - name: received_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: processed_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: status
+            type: VARCHAR(20)
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: ignored
+                label: 已忽略
+              - value: processed
+                label: 已处理
+              - value: received
+                label: 已接收
+              - value: self_backfill_noop
+                label: 自回填无操作
+          - name: error_message
+            type: TEXT
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: support_ticket_refs
+        description: 表单会话——提交会话令牌
+        columns:
+          - name: id
+            type: VARCHAR(36)
+          - name: source_id
+            type: VARCHAR(36)
+          - name: ticket_ref
+            type: VARCHAR(255)
+          - name: user_id
+            type: VARCHAR(36)
+          - name: org_id
+            type: VARCHAR(36)
+          - name: form_url
+            type: TEXT
+          - name: status
+            type: VARCHAR(20)
+            enum_values:
+              - value: created
+                label: 已创建
+              - value: expired
+                label: 已过期
+              - value: submitted
+                label: 已提交
+          - name: expires_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: support_ticket_sources
+        description: 表单源——飞书表单接入配置
+        columns:
+          - name: id
+            type: VARCHAR(36)
+          - name: name
+            type: VARCHAR(255)
+          - name: app_token
+            type: VARCHAR(255)
+          - name: table_id
+            type: VARCHAR(255)
+          - name: form_url_template
+            type: TEXT
+          - name: field_mapping_json
+            type: JSONB
+          - name: active_for_submit
+            type: BOOLEAN
+          - name: sync_enabled
+            type: BOOLEAN
+          - name: capacity_state
+            type: VARCHAR(20)
+          - name: last_capacity_checked_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: support_ticket_sync_states
+        description: 工单同步状态
+        columns:
+          - name: source_id
+            type: VARCHAR(36)
+          - name: last_feishu_updated_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: last_event_processed_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: catch_up_started_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: catch_up_finished_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: last_error
+            type: TEXT
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+      - name: support_tickets
+        description: 工单——客户支持工单
+        columns:
+          - name: id
+            type: VARCHAR(36)
+          - name: source_id
+            type: VARCHAR(36)
+          - name: ticket_ref
+            type: VARCHAR(255)
+            description: 工单号
+          - name: user_id
+            type: VARCHAR(36)
+            description: 提交用户 ID
+          - name: org_id
+            type: VARCHAR(36)
+            description: 组织 ID
+          - name: iam_org_type
+            type: VARCHAR(20)
+          - name: feishu_record_id
+            type: VARCHAR(255)
+          - name: title
+            type: VARCHAR(500)
+            description: 标题
+          - name: description
+            type: TEXT
+          - name: category
+            type: VARCHAR(100)
+            description: 分类
+          - name: contact
+            type: VARCHAR(255)
+          - name: status
+            type: VARCHAR(20)
+            description: 工单状态
+            enum_values:
+              - value: closed
+                label: 已关闭
+              - value: processing
+                label: 处理中
+              - value: replied
+                label: 已回复
+              - value: submitted
+                label: 已提交
+          - name: fields_json
+            type: JSONB
+          - name: submitted_at
+            type: TIMESTAMP WITH TIME ZONE
+            is_time: true
+          - name: feishu_updated_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: last_synced_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: platform_fields_backfill_status
+            type: VARCHAR(20)
+            enum_values:
+              - value: failed
+                label: 失败
+              - value: pending
+                label: 待回填
+              - value: skipped
+                label: 已跳过
+              - value: synced
+                label: 已同步
+          - name: platform_fields_backfilled_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: platform_fields_backfill_error
+            type: TEXT
+          - name: deleted_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: created_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: updated_at
+            type: TIMESTAMP WITH TIME ZONE
+          - name: handle_result
+            type: TEXT
+            description: 处理结果
+          - name: phone
+            type: VARCHAR(64)
+          - name: email
+            type: VARCHAR(255)
+          - name: attachment_names_json
+            type: JSONB

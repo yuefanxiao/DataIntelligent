@@ -216,13 +216,14 @@ const (
 	SeverityInfo  Severity = "info"
 )
 
-// Source 是发现来源（迁移解析 / GORM 交叉验证 / 生产校准）。
+// Source 是发现来源（迁移解析 / GORM 交叉验证 / 生产校准 / 采集清单）。
 type Source string
 
 const (
 	SourceMigration Source = "migration"
 	SourceGORM      Source = "gorm"
 	SourceCalibrate Source = "calibrate"
+	SourceManifest  Source = "manifest"
 )
 
 // Finding 是一条采集/交叉验证/校准发现（门禁与报告共用）。

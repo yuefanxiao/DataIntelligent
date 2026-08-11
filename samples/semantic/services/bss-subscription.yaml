@@ -1,0 +1,386 @@
+version: 1
+service: bss-subscription
+description: 订阅服务——模型定价、产品目录与组织档位
+databases:
+  - name: subscription
+    description: 订阅库（schema subscription）——定价与档位策略
+    tables:
+      - name: model_catalog_heads
+        description: 模型最新产品指针——每模型最新产品快照头
+        schema: subscription
+        columns:
+          - name: model_id
+            type: varchar(191)
+          - name: catalog_sequence
+            type: bigint
+          - name: current_model_product_id
+            type: varchar(64)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: model_catalog_outbox
+        description: 目录事件 outbox——目录变更事件可靠投递
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: event_id
+            type: varchar(64)
+          - name: model_id
+            type: varchar(191)
+          - name: model_product_id
+            type: varchar(64)
+          - name: product_revision
+            type: bigint
+          - name: catalog_sequence
+            type: bigint
+          - name: event_type
+            type: varchar(32)
+            enum_values:
+              - value: created
+                label: 创建
+              - value: delist_set
+                label: 设置下架
+              - value: due_delisted
+                label: 到期下架
+              - value: updated
+                label: 更新
+          - name: status
+            type: varchar(16)
+            enum_values:
+              - value: dead
+                label: 死信
+              - value: pending
+                label: 待处理
+              - value: processed
+                label: 已处理
+              - value: processing
+                label: 处理中
+          - name: attempt_count
+            type: integer
+          - name: available_at
+            type: timestamptz
+          - name: claimed_at
+            type: timestamptz
+          - name: claimed_by
+            type: varchar(128)
+          - name: claim_token
+            type: varchar(64)
+          - name: lease_expires_at
+            type: timestamptz
+          - name: processed_at
+            type: timestamptz
+          - name: last_error
+            type: text
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: model_pricing
+        description: 模型价格——模型×计量项×生效时间的定价表（append-only）
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: model
+            type: varchar(191)
+            description: 模型名（如 qianshi/kimi-k2.5）
+          - name: meter
+            type: smallint
+            description: 计费计量项
+            enum_values:
+              - value: "1"
+                label: 输入 token
+              - value: "10"
+                label: 图片数
+              - value: "11"
+                label: 音频秒数
+              - value: "12"
+                label: 视频秒数
+              - value: "2"
+                label: 输出 token
+              - value: "20"
+                label: 请求数
+              - value: "3"
+                label: 缓存输入 token
+          - name: amount
+            type: numeric(20,8)
+            description: 单价
+          - name: unit_type
+            type: smallint
+            description: 计量单位类型
+            enum_values:
+              - value: "1"
+                label: token
+              - value: "2"
+                label: 图片
+              - value: "3"
+                label: 秒
+          - name: unit_quantity
+            type: bigint
+          - name: currency
+            type: char(3)
+          - name: tags
+            type: jsonb
+          - name: effective_from
+            type: timestamptz
+            description: 价格生效时间
+            is_time: true
+          - name: created_at
+            type: timestamptz
+          - name: amount_scale
+            type: smallint
+      - name: model_products
+        description: 模型产品目录——可售模型产品（上架/下架状态）
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: model_product_id
+            type: varchar(64)
+          - name: create_idempotency_key
+            type: varchar(191)
+          - name: create_request_hash
+            type: varchar(64)
+          - name: model_id
+            type: varchar(191)
+          - name: model_name
+            type: varchar(255)
+          - name: provider
+            type: varchar(128)
+          - name: type
+            type: varchar(32)
+          - name: tags
+            type: jsonb
+          - name: release_date
+            type: varchar(32)
+          - name: parameters
+            type: varchar(64)
+          - name: context_length
+            type: varchar(64)
+          - name: max_output_tokens
+            type: varchar(64)
+          - name: input_modalities
+            type: jsonb
+          - name: output_modalities
+            type: jsonb
+          - name: capabilities
+            type: jsonb
+          - name: description
+            type: text
+          - name: display_badges
+            type: jsonb
+          - name: status
+            type: varchar(32)
+            enum_values:
+              - value: DELISTED
+                label: 已下架
+              - value: DELIST_SCHEDULED
+                label: 下架中
+              - value: LISTED
+                label: 已上架
+              - value: PREPUBLISHED
+                label: 待发布
+          - name: listed_at
+            type: timestamptz
+            is_time: true
+          - name: delist_at
+            type: timestamptz
+          - name: delisted_at
+            type: timestamptz
+          - name: current_pricing_effective_from
+            type: timestamptz
+          - name: revision
+            type: bigint
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: publish_idempotency_key
+            type: varchar(191)
+          - name: publish_request_hash
+            type: varchar(64)
+      - name: org_tier_states
+        description: 组织档位状态——计算/生效档位与消费水位
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(64)
+          - name: computed_tier
+            type: varchar(32)
+          - name: effective_tier
+            type: varchar(32)
+          - name: effective_source
+            type: varchar(16)
+            enum_values:
+              - value: computed
+                label: 计算
+              - value: override
+                label: 人工覆盖
+          - name: has_successful_recharge
+            type: boolean
+          - name: recharge_succeeded_at
+            type: timestamptz
+          - name: lifetime_consumed_amount
+            type: numeric(30,12)
+          - name: consumption_updated_at
+            type: timestamptz
+          - name: computed_at
+            type: timestamptz
+            is_time: true
+          - name: upgraded_at
+            type: timestamptz
+          - name: last_reconciled_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: computed_tier_id
+            type: varchar(64)
+          - name: computed_tier_label
+            type: varchar(32)
+          - name: effective_tier_id
+            type: varchar(64)
+          - name: effective_tier_label
+            type: varchar(32)
+          - name: policy_version
+            type: bigint
+          - name: effective_policy_version
+            type: bigint
+          - name: computed_sort_order
+            type: integer
+          - name: effective_sort_order
+            type: integer
+          - name: tier_score
+            type: numeric(30,12)
+          - name: lifetime_recharged_amount
+            type: numeric(30,12)
+          - name: recharge_updated_at
+            type: timestamptz
+          - name: quota_version
+            type: bigint
+          - name: tier_override_watermark_source_id
+            type: varchar(64)
+          - name: tier_override_watermark_version
+            type: bigint
+          - name: tier_override_watermark_hash
+            type: varchar(64)
+      - name: sync_watermarks
+        description: 同步水位——Kafka→Redis 投影水位
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: watermark_key
+            type: varchar(64)
+          - name: last_synced_at
+            type: timestamptz
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+      - name: tier_overrides
+        description: 人工档位覆盖——运营对组织的档位/配额覆盖
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: org_id
+            type: varchar(64)
+          - name: tier
+            type: varchar(32)
+          - name: reason
+            type: varchar(512)
+          - name: effective_from
+            type: timestamptz
+          - name: effective_to
+            type: timestamptz
+          - name: rpm
+            type: integer
+          - name: tpm
+            type: integer
+          - name: concurrency
+            type: integer
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: tier_id
+            type: varchar(64)
+          - name: tier_label
+            type: varchar(32)
+          - name: policy_version
+            type: bigint
+          - name: sort_order
+            type: integer
+          - name: source_id
+            type: varchar(64)
+          - name: source_version
+            type: bigint
+      - name: tier_policy_items
+        description: 档位阈值——各档位的积分/配额阈值
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: policy_version_id
+            type: bigint
+          - name: tier_id
+            type: varchar(64)
+          - name: label
+            type: varchar(32)
+          - name: sort_order
+            type: integer
+          - name: is_floor
+            type: boolean
+          - name: required_score
+            type: numeric(30,12)
+          - name: rpm
+            type: integer
+          - name: tpm
+            type: integer
+          - name: concurrency
+            type: integer
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+        references:
+          - to: bss-subscription.subscription.tier_policy_versions
+            "on": tier_policy_items.policy_version_id = tier_policy_versions.id
+      - name: tier_policy_versions
+        description: 档位策略版本——升级/降级策略版本
+        schema: subscription
+        columns:
+          - name: id
+            type: bigint
+          - name: version
+            type: bigint
+          - name: recharge_score_rate
+            type: numeric(30,12)
+          - name: consumption_score_rate
+            type: numeric(30,12)
+          - name: upgrade_strategy
+            type: varchar(32)
+            enum_values:
+              - value: AUTO_UPGRADE
+                label: 自动升级
+          - name: downgrade_strategy
+            type: varchar(32)
+            enum_values:
+              - value: MONTHLY_ACTIVE_CONSUMPTION_DOWNGRADE
+                label: 按月活跃消费降级
+              - value: NO_DOWNGRADE
+                label: 不降级
+          - name: created_by
+            type: varchar(128)
+          - name: created_at
+            type: timestamptz
+          - name: updated_at
+            type: timestamptz
+          - name: first_recharge_gate_amount
+            type: numeric(30,12)
