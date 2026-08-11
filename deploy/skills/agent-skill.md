@@ -25,6 +25,5 @@
 - **被拒后调整**（按错误 `kind`；网关不重试、无自愈循环）：
   - `permission_denied`：表未授权 → 改用已授权表/口径，或请运维 `dgw grant-add`；
   - `rate_limited`：并发超限（每 key 2 / 进程 8）→ 稍后重试（不排队）；
-  - `invalid_request`（`details.reason=syntax_error` 或参数类）：SQL 语法/参数错误 → 按 details 修正后重试；
-  - `timeout`：statement_timeout 30s 内未完成 → 缩小时间窗/简化聚合后重试；
+  - `invalid_request`：看 `details.reason`——`syntax_error`/参数类 → 修正后重试；`timeout`（statement_timeout 30s 内未完成）→ 缩小时间窗/简化聚合后重试；
   - `internal`：服务端故障，调用方不可自愈 → 上报网关运维者。

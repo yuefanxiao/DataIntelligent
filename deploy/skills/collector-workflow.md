@@ -50,7 +50,4 @@ dgw-collect calibrate --repo ~/cloud/neo-cloud \
 
 ## 回滚（commit 即版本）
 
-```sh
-git -C <clone> revert <commit>
-dgw semantic-sync --dir <clone>   # 墓碑传播删除（ADR-0002）
-```
+`git revert <commit>` → 重跑 `semantic-sync`（墓碑传播删除，ADR-0002）；完整操作路径见 [`deploy/semantic-repo/README.md`](../semantic-repo/README.md)。
