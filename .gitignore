@@ -26,3 +26,7 @@ deploy/demo/run/
 # demo 运行产物（执行记录/运行时存储）
 deploy/demo/logs/
 deploy/demo/dgw.db*
+
+# 验收重放产物（报告留档在本地；运行产物不入 git）
+deploy/accept/reports/
+deploy/accept/logs/
