@@ -105,8 +105,10 @@ func ValidateFQN(fqn string) error {
 		if p == "" {
 			return fmt.Errorf("表 FQN 第 %d 段为空: %q", i+1, fqn)
 		}
-		if strings.ContainsAny(p, " \t\r\n") {
-			return fmt.Errorf("表 FQN 段不能含空白: %q", fqn)
+		// \x00 是内部复合键分隔符（expandKey），与 validateName/EntityFQN
+		// 同一拒绝组（review 修复：防授权键错位）。
+		if strings.ContainsAny(p, "\x00 \t\r\n") {
+			return fmt.Errorf("表 FQN 段不能含控制字符或空白: %q", fqn)
 		}
 	}
 	return nil
