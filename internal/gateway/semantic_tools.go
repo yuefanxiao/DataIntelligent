@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -22,6 +23,41 @@ import (
 //
 // 错误映射统一走 semToolErr：实体不存在/类型不符 = invalid_request（调用
 // 方可调整参数重试），存储故障 = internal（不可自愈）。
+
+// 语义工具输入长度上限（review 修复，安全边界）：查询词/实体 FQN 是
+// 认证调用方的不可信输入，无界输入会放大 FTS5 trigram 分词 CPU
+// （实测 1MB ≈ 5.5s）、执行记录落盘量与（配置向量通道时）外发
+// api.openai.com 的文本量。边界处截断 = 结构化拒绝，快速失败。
+const (
+	maxQueryRunes = 256 // 搜索关键词上限（真实查询远小于此）
+	maxFQNRunes   = 512 // 实体 FQN 上限（FQN 段由 YAML 作者入口约束）
+)
+
+// guardQuery 校验搜索关键词（空 + 长度上限）。
+func guardQuery(query string) *gwerr.Error {
+	if strings.TrimSpace(query) == "" {
+		return gwerr.InvalidRequest("查询为空", map[string]any{"reason": "empty"})
+	}
+	if utf8.RuneCountInString(query) > maxQueryRunes {
+		return gwerr.InvalidRequest(
+			fmt.Sprintf("查询过长（上限 %d 字符）", maxQueryRunes),
+			map[string]any{"reason": "too_long", "max": maxQueryRunes})
+	}
+	return nil
+}
+
+// guardFQN 校验实体 FQN（空 + 长度上限）。
+func guardFQN(fqn string) *gwerr.Error {
+	if strings.TrimSpace(fqn) == "" {
+		return gwerr.InvalidRequest("FQN 为空", map[string]any{"reason": "empty"})
+	}
+	if utf8.RuneCountInString(fqn) > maxFQNRunes {
+		return gwerr.InvalidRequest(
+			fmt.Sprintf("FQN 过长（上限 %d 字符）", maxFQNRunes),
+			map[string]any{"reason": "too_long", "max": maxFQNRunes})
+	}
+	return nil
+}
 
 // ── search_entities ───────────────────────────────────────────────────
 
@@ -41,8 +77,8 @@ type searchHit struct {
 // RRF 融合（关键词命中恒在向量命中之前，ADR-0002）。向量通道未配置
 // （WithSearchEmbed 未注入）或向量库不可用 = 纯关键词检索（降级不报错）。
 func (g *Gateway) handleSearchEntities(ctx context.Context, req *mcp.CallToolRequest, in searchEntitiesInput) (*mcp.CallToolResult, *searchEntitiesResult, error) {
-	if strings.TrimSpace(in.Query) == "" {
-		return errResult(gwerr.InvalidRequest("查询为空", map[string]any{"reason": "empty"})), nil, nil
+	if e := guardQuery(in.Query); e != nil {
+		return errResult(e), nil, nil
 	}
 	switch in.Type {
 	case "", "concept", "metric":
@@ -60,7 +96,7 @@ func (g *Gateway) handleSearchEntities(ctx context.Context, req *mcp.CallToolReq
 	if err != nil {
 		return errResult(gwerr.Internal(fmt.Sprintf("语义检索失败: %v", err))), nil, nil
 	}
-	out := &searchEntitiesResult{Total: total}
+	out := &searchEntitiesResult{Hits: []searchHit{}, Total: total}
 	for _, h := range hits {
 		out.Hits = append(out.Hits, searchHit{FQN: h.FQN, Kind: string(h.Kind), Name: h.Name, Description: h.Description})
 	}
@@ -103,8 +139,8 @@ type relationSummaryResult struct {
 
 // handleGetEntity FQN 精确查询（含枚举挂列、is_time、关系摘要）。
 func (g *Gateway) handleGetEntity(ctx context.Context, req *mcp.CallToolRequest, in getEntityInput) (*mcp.CallToolResult, *getEntityResult, error) {
-	if strings.TrimSpace(in.FQN) == "" {
-		return errResult(gwerr.InvalidRequest("FQN 为空", map[string]any{"reason": "empty"})), nil, nil
+	if e := guardFQN(in.FQN); e != nil {
+		return errResult(e), nil, nil
 	}
 	d, err := semantic.GetEntityDetail(ctx, g.store, in.FQN)
 	if err != nil {
@@ -155,8 +191,8 @@ type traverseEdge struct {
 // handleTraverseRelations 类型化边遍历（双向多跳、有界：深度硬上限 5、
 // 节点数硬上限 200，触界 truncated 标记——与 SQL 行数截断同一哲学）。
 func (g *Gateway) handleTraverseRelations(ctx context.Context, req *mcp.CallToolRequest, in traverseRelationsInput) (*mcp.CallToolResult, *traverseRelationsResult, error) {
-	if strings.TrimSpace(in.FQN) == "" {
-		return errResult(gwerr.InvalidRequest("FQN 为空", map[string]any{"reason": "empty"})), nil, nil
+	if e := guardFQN(in.FQN); e != nil {
+		return errResult(e), nil, nil
 	}
 	switch semantic.RelationType(in.Relation) {
 	case semantic.RelConnectsTo, semantic.RelContains, semantic.RelReferences, semantic.RelDescribes:
@@ -185,7 +221,7 @@ func (g *Gateway) handleTraverseRelations(ctx context.Context, req *mcp.CallTool
 	if err != nil {
 		return errResult(semToolErr(err)), nil, nil
 	}
-	out := &traverseRelationsResult{Truncated: res.Truncated}
+	out := &traverseRelationsResult{Nodes: []traverseNode{}, Edges: []traverseEdge{}, Truncated: res.Truncated}
 	for _, n := range res.Nodes {
 		out.Nodes = append(out.Nodes, traverseNode{FQN: n.FQN, Kind: string(n.Kind), Name: n.Name, Description: n.Description})
 	}
@@ -216,8 +252,8 @@ type getMetricDefinitionResult struct {
 // 表达式/聚合/过滤原样 + 时间谓词（[start, end) 半开区间）应用到依赖表
 // 的 is_time 列，产出可直接交给 execute_sql 的 SQL 文本；本工具不执行。
 func (g *Gateway) handleGetMetricDefinition(ctx context.Context, req *mcp.CallToolRequest, in getMetricDefinitionInput) (*mcp.CallToolResult, *getMetricDefinitionResult, error) {
-	if strings.TrimSpace(in.FQN) == "" {
-		return errResult(gwerr.InvalidRequest("指标 FQN 为空", map[string]any{"reason": "empty"})), nil, nil
+	if e := guardFQN(in.FQN); e != nil {
+		return errResult(e), nil, nil
 	}
 	var start, end *time.Time
 	if in.TimeRange != nil {
@@ -269,14 +305,14 @@ type listEnumValuesResult struct {
 // handleListEnumValues 列枚举取值（CHECK 约束语义）：按 value 排序、
 // 有界（≤100 + total + truncated）。
 func (g *Gateway) handleListEnumValues(ctx context.Context, req *mcp.CallToolRequest, in listEnumValuesInput) (*mcp.CallToolResult, *listEnumValuesResult, error) {
-	if strings.TrimSpace(in.FQN) == "" {
-		return errResult(gwerr.InvalidRequest("列 FQN 为空", map[string]any{"reason": "empty"})), nil, nil
+	if e := guardFQN(in.FQN); e != nil {
+		return errResult(e), nil, nil
 	}
 	values, total, truncated, err := semantic.ListEnumValues(ctx, g.store, in.FQN, semantic.EnumValuesLimit)
 	if err != nil {
 		return errResult(semToolErr(err)), nil, nil
 	}
-	out := &listEnumValuesResult{ColumnFQN: in.FQN, Total: total, Truncated: truncated}
+	out := &listEnumValuesResult{ColumnFQN: in.FQN, Values: []enumValueResult{}, Total: total, Truncated: truncated}
 	for _, v := range values {
 		out.Values = append(out.Values, enumValueResult{Value: v.Value, Label: v.Label})
 	}

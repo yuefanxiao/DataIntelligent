@@ -147,8 +147,9 @@ func embedEntity(e Entity) string {
 // SaveEmbeddings 把实体向量写入 dgw_sem_embeddings（幂等 upsert）并同步
 // 维护 vec0 检索索引（08 票，ADR-0005：双写，vec0 是 KNN 索引面）。vec0
 // 不支持 UPSERT/REPLACE（虚拟表限制），更新 = 先删后插。维度与索引不符
-// （模型切换）由 EnsureVecIndex 重建。失败返回错误——调用方按「降级不
-// 阻塞」处理（与 embedding 生成失败同一契约）。
+// （模型切换）由 EnsureVecIndex 重建。双写在单事务内（review 修复：
+// 崩溃不留半态漂移窗口）。失败返回错误——调用方按「降级不阻塞」处理
+// （与 embedding 生成失败同一契约）。
 func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, vecs [][]float32) error {
 	if len(fqns) != len(vecs) {
 		return fmt.Errorf("SaveEmbeddings: %d 个 FQN vs %d 个向量", len(fqns), len(vecs))
@@ -158,9 +159,14 @@ func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, v
 			return err
 		}
 	}
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
 	for i, fqn := range fqns {
 		buf := encodeFloats(vecs[i])
-		if _, err := st.DB().ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO dgw_sem_embeddings (entity_fqn, model, vector)
 			VALUES (?, ?, ?)
 			ON CONFLICT(entity_fqn) DO UPDATE SET
@@ -169,15 +175,18 @@ func SaveEmbeddings(ctx context.Context, st DBer, model string, fqns []string, v
 			fqn, model, buf); err != nil {
 			return fmt.Errorf("save embedding %s: %w", fqn, err)
 		}
-		if _, err := st.DB().ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM dgw_sem_vec WHERE entity_fqn = ?`, fqn); err != nil {
 			return fmt.Errorf("delete vec0 row %s: %w", fqn, err)
 		}
-		if _, err := st.DB().ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO dgw_sem_vec (entity_fqn, vector) VALUES (?, ?)`,
 			fqn, buf); err != nil {
 			return fmt.Errorf("save vec0 row %s: %w", fqn, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit embeddings: %w", err)
 	}
 	return nil
 }
@@ -347,7 +356,7 @@ func EmbeddingCoverage(ctx context.Context, st DBer, model string) (missing, mis
 
 // RemoveEmbeddings 删除实体的向量（墓碑对应面：实体被墓碑化后其向量一并
 // 清理，检索不再命中死实体；幂等，可重复调用）。embeddings 与 vec0 双删
-// （08 票双写维护，索引面不留孤儿行）。
+// （08 票双写维护，索引面不留孤儿行），单事务内（review 修复）。
 func RemoveEmbeddings(ctx context.Context, st DBer, fqns []string) error {
 	if len(fqns) == 0 {
 		return nil
@@ -357,12 +366,20 @@ func RemoveEmbeddings(ctx context.Context, st DBer, fqns []string) error {
 	for i, f := range fqns {
 		args[i] = f
 	}
-	if _, err := st.DB().ExecContext(ctx, query, args...); err != nil {
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("remove embeddings: %w", err)
 	}
-	if _, err := st.DB().ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM dgw_sem_vec WHERE entity_fqn IN (?"+strings.Repeat(",?", len(fqns)-1)+")", args...); err != nil {
 		return fmt.Errorf("remove vec0 rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit remove embeddings: %w", err)
 	}
 	return nil
 }

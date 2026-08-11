@@ -34,7 +34,8 @@ const (
 	SearchLimit = 20
 	// SearchCandidateCap 是 RRF 单通道的候选上限：关键词/向量各取前 N 进
 	// 融合。关键词权重 2 : 向量权重 1 + 同候选上限 ⇒ 关键词命中恒排在
-	// 向量命中之前（ADR-0002「关键词命中排向量命中之前」，见 rrfScore）。
+	// 向量命中之前（ADR-0002「关键词命中排向量命中之前」，见下方 RRF
+	// 融合段的数学推导）。
 	SearchCandidateCap = 50
 	// rrfK / rrfKeywordWeight / rrfVectorWeight 是 RRF 融合参数（k=60 是
 	// RRF 惯例常数；关键词通道权重 2 保证「关键词主通道优先」）。
@@ -65,9 +66,10 @@ type SearchHit struct {
 
 // SearchEntities 是双入口关键词+向量 RRF 混合检索（ADR-0002/0005）：
 //
-//   - 关键词主通道：FTS5 trigram（≥3 字符短语匹配，CJK/英文子串均可）；
-//     短查询（<3 字符）退 LIKE 兜底（trigram 无法索引 3 字符以下窗口）。
-//     按实体类型过滤（kind 列，查询侧）。
+//   - 关键词主通道：FTS5 trigram（≥3 字符子串匹配，CJK/英文均可）；多词
+//     查询按空白切分 AND 组合（"payment failure" 可命中 payment_failure
+//     类标识符）；全段都 <3 字符时退 LIKE 兜底（trigram 无法索引 3 字符
+//     以下窗口）。按实体类型过滤（kind 列，查询侧）。
 //   - 向量兜底通道：查询文本经 emb 嵌入 → vec0 KNN 取候选。emb 为 nil
 //     或向量库不可用（未同步/维度不符/嵌入失败）= 降级为纯关键词检索
 //     （向量是兜底通道，缺失不阻断主通道）；降级原因经 logf 上报
@@ -79,6 +81,9 @@ type SearchHit struct {
 func SearchEntities(ctx context.Context, st DBer, query, typ string, emb Embedder, limit int, logf func(format string, args ...any)) ([]SearchHit, int, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, 0, fmt.Errorf("SearchEntities: 查询为空")
+	}
+	if limit <= 0 {
+		return nil, 0, fmt.Errorf("SearchEntities: limit %d 非法（必须 > 0）", limit)
 	}
 	switch typ {
 	case "", "concept", "metric":
@@ -185,15 +190,16 @@ type rrfEntry struct {
 // 按相关度排序的实体 FQN（≤ cap 条，已按 kind 过滤）。
 func keywordHits(ctx context.Context, st DBer, query, typ string, cap int) ([]string, error) {
 	kinds := searchKinds(typ)
-	if utf8.RuneCountInString(query) < 3 {
+	// 多词 AND（review 修复）：整体短语的 trigram 含空格窗口，无法命中
+	// snake_case 标识符（"payment failure" vs payment_failure_rate）；
+	// 按空白切分后逐段短语化（引号加倍转义，FTS5 语法字符字面化）AND 组合
+	// ——每段 ≥3 字符才保留（trigram 无法索引 3 字符以下窗口）。
+	q := ftsAndQuery(query)
+	if q == "" {
 		return likeHits(ctx, st, query, kinds, cap)
 	}
-	// 短语包裹：FTS5 查询语法字符（- " ( ) * 等）一律字面化（引号加倍），
-	// 杜绝「payment-service」被解析成「payment AND NOT service」类歧义；
-	// trigram 分词下短语 = 子串匹配（含 CJK）。
-	phrase := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
 	// 参数顺序与 SQL 占位符一一对应：MATCH → kind IN → LIMIT。
-	args := append([]any{phrase}, append(anySlice(kinds), cap)...)
+	args := append([]any{q}, append(anySlice(kinds), cap)...)
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT fqn FROM dgw_sem_fts
 		WHERE dgw_sem_fts MATCH ? AND kind IN (`+kindPlaceholders(len(kinds))+`)
@@ -214,6 +220,20 @@ func keywordHits(ctx context.Context, st DBer, query, typ string, cap int) ([]st
 		return nil, err
 	}
 	return out, nil
+}
+
+// ftsAndQuery 把用户查询转成 FTS5 查询串：按空白切分 → 每段 ≥3 字符才
+// 保留 → 每段短语化（内部引号加倍转义）→ 空格 AND 组合。返回 "" 表示
+// 没有可入 FTS 的段（全短词），调用方退 LIKE 兜底。
+func ftsAndQuery(query string) string {
+	phrases := []string{}
+	for _, term := range strings.Fields(query) {
+		if utf8.RuneCountInString(term) < 3 {
+			continue // trigram 无法索引 3 字符以下窗口
+		}
+		phrases = append(phrases, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	return strings.Join(phrases, " ")
 }
 
 // likeHits 是短查询（<3 字符，trigram 无法索引）的 LIKE 兜底（ADR-0005
@@ -248,6 +268,11 @@ func likeHits(ctx context.Context, st DBer, query string, kinds []Kind, cap int)
 // vectorHits 向量通道：查询文本嵌入 → vec0 KNN（余弦距离升序）→ 返回
 // ≤ cap 条实体 FQN（按距离排序，已按 kind 过滤）。向量库不可用（表缺失
 // /维度不符/嵌入失败）返回错误——调用方降级为纯关键词检索。
+//
+// kind 过滤在 KNN 之后（vec0 无 kind 列，join 实体表取 kind）：k 取
+// cap×10 的超采——否则类型限定查询（如 type=metric）在「另一 kind 的
+// 实体全部更近」时前 k 近邻被占满，目标类型候选被静默掏空（review
+// 修复，实测复现）。超采后取前 cap 条目标类型候选，仍是有界扫描。
 func vectorHits(ctx context.Context, st DBer, emb Embedder, query, typ string, cap int) ([]string, error) {
 	vecs, err := emb.Embed(ctx, []string{query})
 	if err != nil {
@@ -257,17 +282,14 @@ func vectorHits(ctx context.Context, st DBer, emb Embedder, query, typ string, c
 		return nil, fmt.Errorf("embed query: 返回 %d 个向量（期望 1）", len(vecs))
 	}
 	kinds := searchKinds(typ)
-	// KNN 候选先按类型过滤（vec0 无 kind 列，join 实体表取 kind）。
-	// 参数顺序与 SQL 占位符一一对应：MATCH → kind IN → k。
-	// k 是 vec0 的 KNN 约束（外层 LIMIT 对虚拟表扫描不可见，会报
-	// 「A LIMIT or 'k = ?' constraint is required」，实测）。
-	args := append([]any{encodeFloats(vecs[0])}, append(anySlice(kinds), cap)...)
+	// 参数顺序与 SQL 占位符一一对应：MATCH → k → kind IN → LIMIT。
+	args := append([]any{encodeFloats(vecs[0]), cap * 10}, append(anySlice(kinds), cap)...)
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT v.entity_fqn FROM dgw_sem_vec v
 		JOIN dgw_sem_entities e ON e.fqn = v.entity_fqn AND e.tombstone = 0
-		WHERE v.vector MATCH ? AND e.kind IN (`+kindPlaceholders(len(kinds))+`)
-		  AND k = ?
-		ORDER BY v.distance`, args...)
+		WHERE v.vector MATCH ? AND k = ?
+		  AND e.kind IN (`+kindPlaceholders(len(kinds))+`)
+		ORDER BY v.distance LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("vec0 knn: %w", err)
 	}
@@ -297,16 +319,16 @@ func searchKinds(typ string) []Kind {
 	return []Kind{KindConcept, KindMetric}
 }
 
-// entitiesByFQNs 批量取实体（跳过墓碑），分块 IN 查询避免 SQLite 参数
-// 上限（默认 999）。返回 map 保序性由调用方维护。
+// entitiesByFQNs 批量取实体（墓碑在 SQL 侧过滤），分块 IN 查询避免
+// SQLite 参数上限（默认 999）。返回 map 保序性由调用方维护。
 func entitiesByFQNs(ctx context.Context, st DBer, fqns []string) (map[string]Entity, error) {
 	out := map[string]Entity{}
 	const chunk = 500
 	for start := 0; start < len(fqns); start += chunk {
 		end := min(start+chunk, len(fqns))
 		part := fqns[start:end]
-		query := `SELECT fqn, kind, name, description, tombstone FROM dgw_sem_entities
-			WHERE fqn IN (?` + strings.Repeat(",?", len(part)-1) + `)`
+		query := `SELECT fqn, kind, name, description FROM dgw_sem_entities
+			WHERE fqn IN (?` + strings.Repeat(",?", len(part)-1) + `) AND tombstone = 0`
 		args := make([]any, len(part))
 		for i, f := range part {
 			args[i] = f
@@ -318,13 +340,9 @@ func entitiesByFQNs(ctx context.Context, st DBer, fqns []string) (map[string]Ent
 		for rows.Next() {
 			var e Entity
 			var kind string
-			var tomb int
-			if err := rows.Scan(&e.FQN, &kind, &e.Name, &e.Description, &tomb); err != nil {
+			if err := rows.Scan(&e.FQN, &kind, &e.Name, &e.Description); err != nil {
 				rows.Close()
 				return nil, err
-			}
-			if tomb != 0 {
-				continue
 			}
 			e.Kind = Kind(kind)
 			out[e.FQN] = e
@@ -617,6 +635,14 @@ func MetricDefinition(ctx context.Context, st DBer, fqn string, start, end *time
 		d.Note = "指标未声明依赖表（tables 为空），无法 dry-run 展开"
 		return d, nil
 	}
+	if len(tables) > 1 {
+		// 多表指标的 dry-run 是「FROM 表列表」形态（review 修复的诚实
+		// 注记）：join 谓词不在本展开范围内（references 边的 on 条件属
+		// 表间拓扑，v1 指标口径约定连接条件写在 expression/filter 里），
+		// 无连接条件的列表 = 笛卡尔积，直接执行结果错误——如实提示，
+		// 不假装可执行。
+		d.Note = fmt.Sprintf("指标依赖 %d 张表：FROM 为无连接条件列表，join 谓词需在 expression/filter 中表达（否则为笛卡尔积）", len(tables))
+	}
 
 	// 展开 SQL：SELECT <expr> AS <name> FROM <t1>, <t2> WHERE ...
 	// FROM 用 PG 表名（FQN 末段；execute_sql 路由按服务.库.表解析同名单表），
@@ -714,6 +740,9 @@ func tableNames(fqns []string) string {
 // value 排序、有界（limit + total + truncated）。列不存在返回 ErrNotFound，
 // 非列实体返回错误。
 func ListEnumValues(ctx context.Context, st DBer, columnFQN string, limit int) ([]EnumValue, int, bool, error) {
+	if limit <= 0 {
+		return nil, 0, false, fmt.Errorf("ListEnumValues: limit %d 非法（必须 > 0）", limit)
+	}
 	e, err := GetEntity(ctx, st, columnFQN)
 	if err != nil {
 		return nil, 0, false, err

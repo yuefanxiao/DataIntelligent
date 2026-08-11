@@ -299,6 +299,17 @@ func TestSemanticToolsErrors(t *testing.T) {
 	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "wrong_kind" {
 		t.Errorf("wrong_kind(列) = %+v", e)
 	}
+
+	// 长度上限（对抗评审 P2）：超长查询/FQN 边界处结构化拒绝（不触发
+	// FTS5 分词 CPU 放大与执行记录落盘放大）。
+	e = callSemErr(t, session, "search_entities", map[string]any{"query": strings.Repeat("支", 300)})
+	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "too_long" {
+		t.Errorf("超长查询 = %+v", e)
+	}
+	e = callSemErr(t, session, "get_entity", map[string]any{"fqn": strings.Repeat("a", 600)})
+	if e.Kind != gwerr.KindInvalidRequest || e.Details["reason"] != "too_long" {
+		t.Errorf("超长 FQN = %+v", e)
+	}
 }
 
 // ── 向量通道（脚本化 fake，MCP 全链路）─────────────────────────────────

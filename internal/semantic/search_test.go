@@ -539,6 +539,123 @@ func TestListEnumValues(t *testing.T) {
 	}
 }
 
+// ── 对抗评审回归 ───────────────────────────────────────────────────────
+
+// 类型限定 + 向量兜底不被异类实体挤空（对抗评审 P1）：vec0 KNN 的 k 先
+// 于 kind 过滤，若前 k 近邻被另一 kind 占满，type 限定查询的候选会被
+// 静默掏空——k 超采（cap×10）后过滤，目标类型候选仍可见。
+func TestSearchEntitiesVectorKindNotDrained(t *testing.T) {
+	st := searchFixture(t)
+	ctx := context.Background()
+	const q = "zzz_kinddrain" // 关键词零命中，纯向量路径
+
+	// 60 个概念向量比 60 个指标向量更近（概念距离 0.1 系，指标距离 0.9 系）：
+	// 前 50 近邻全是概念——超采前 type=metric 的候选被掏空。
+	fqns := make([]string, 0, 120)
+	vecs := make([][]float32, 0, 120)
+	for i := 0; i < 60; i++ {
+		fqn := fmt.Sprintf("concept_drain_%02d", i)
+		if _, err := st.DB().ExecContext(ctx, `
+			INSERT INTO dgw_sem_entities (fqn, kind, name, description, tombstone)
+			VALUES (?, 'concept', ?, 'drain 概念', 0)`, fqn, fqn); err != nil {
+			t.Fatalf("直插概念: %v", err)
+		}
+		fqns = append(fqns, fqn)
+		vecs = append(vecs, vec(0.98, 0.01, float32(i)/100, 0))
+	}
+	for i := 0; i < 60; i++ {
+		fqn := fmt.Sprintf("metric_drain_%02d", i)
+		if _, err := st.DB().ExecContext(ctx, `
+			INSERT INTO dgw_sem_entities (fqn, kind, name, description, tombstone)
+			VALUES (?, 'metric', ?, 'drain 指标', 0)`, fqn, fqn); err != nil {
+			t.Fatalf("直插指标: %v", err)
+		}
+		fqns = append(fqns, fqn)
+		vecs = append(vecs, vec(0.1, 0.95, float32(i)/100, 0))
+	}
+	if err := SaveEmbeddings(ctx, st, "test-model", fqns, vecs); err != nil {
+		t.Fatalf("SaveEmbeddings: %v", err)
+	}
+	emb := &scriptedEmbedder{vecs: map[string][]float32{q: vec(1, 0, 0, 0)}}
+
+	hits, total, err := SearchEntities(ctx, st, q, "metric", emb, SearchLimit, nil)
+	if err != nil {
+		t.Fatalf("SearchEntities(metric): %v", err)
+	}
+	if total == 0 || len(hits) == 0 {
+		t.Fatalf("type=metric 候选被掏空：total=%d hits=%d（k 超采修复失效）", total, len(hits))
+	}
+	for _, h := range hits {
+		if h.Kind != KindMetric {
+			t.Errorf("type=metric 返回了 %s（kind=%s）", h.FQN, h.Kind)
+		}
+	}
+}
+
+// 多词 AND（对抗评审 P2）："payment failure" 类查询（空格分词）应命中
+// snake_case 标识符实体（trigram 整体短语含空格窗口无法命中下划线）。
+func TestSearchEntitiesMultiWordAND(t *testing.T) {
+	st := searchFixture(t)
+	ctx := context.Background()
+	hits, total, err := SearchEntities(ctx, st, "payment failure", "", nil, SearchLimit, nil)
+	if err != nil {
+		t.Fatalf("SearchEntities(多词): %v", err)
+	}
+	if total == 0 {
+		t.Fatal("「payment failure」应 AND 命中 payment_failure 类实体")
+	}
+	got := map[string]bool{}
+	for _, h := range hits {
+		got[h.FQN] = true
+	}
+	if !got["payment_failure"] && !got["payment_failure_rate"] {
+		t.Errorf("多词 AND 命中 = %v，期望含 payment_failure/payment_failure_rate", got)
+	}
+}
+
+// 多表指标 dry-run 的诚实注记（对抗评审 P2）：FROM 无连接条件 = 笛卡尔
+// 积，如实提示而非假装可执行。
+func TestMetricDefinitionMultiTableNote(t *testing.T) {
+	st := searchFixture(t)
+	ctx := context.Background()
+	// 直插第二个依赖表 + 关联边，构造双表指标（orders 已存在，用 refunds）。
+	if _, err := st.DB().ExecContext(ctx, `
+		INSERT INTO dgw_sem_entities (fqn, kind, name, description, tombstone)
+		VALUES ('order-service.order_db.refunds', 'table', 'refunds', '退款单', 0)`); err != nil {
+		t.Fatalf("直插表: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `
+		INSERT INTO dgw_sem_relations (type, src_fqn, dst_fqn, meta, tombstone)
+		VALUES ('describes', 'payment_failure_rate', 'order-service.order_db.refunds', '', 0)`); err != nil {
+		t.Fatalf("直插边: %v", err)
+	}
+	d, err := MetricDefinition(ctx, st, "payment_failure_rate", nil, nil)
+	if err != nil {
+		t.Fatalf("MetricDefinition(双表): %v", err)
+	}
+	if len(d.Tables) != 2 {
+		t.Fatalf("依赖表 = %v，期望 2", d.Tables)
+	}
+	if d.Note == "" || !strings.Contains(d.Note, "join 谓词需在 expression/filter 中表达") {
+		t.Errorf("双表指标应如实注记笛卡尔积风险，Note = %q", d.Note)
+	}
+}
+
+// 非法 limit（对抗评审 P2）：导出 API 的负 limit 不再 panic。
+func TestSearchLimitsValidated(t *testing.T) {
+	st := searchFixture(t)
+	ctx := context.Background()
+	if _, _, err := SearchEntities(ctx, st, "支付", "", nil, 0, nil); err == nil {
+		t.Error("limit=0 应报错")
+	}
+	if _, _, err := SearchEntities(ctx, st, "支付", "", nil, -1, nil); err == nil {
+		t.Error("limit=-1 应报错（不再 panic）")
+	}
+	if _, _, _, err := ListEnumValues(ctx, st, "payment-service.payment_db.payments.status", -1); err == nil {
+		t.Error("ListEnumValues limit=-1 应报错（不再 panic）")
+	}
+}
+
 // ── 索引维护（Apply 的 FTS 面 + vec0 面）───────────────────────────────
 
 // FTS 与实体同事务：墓碑实体从关键词索引消失；历史库（索引空 + 实体面
