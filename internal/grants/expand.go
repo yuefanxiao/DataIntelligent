@@ -22,7 +22,7 @@ type expandResult struct {
 //	service:xxx / database:xxx → Expander.Expand（表清单快照）+ pattern 声明
 //
 // expand == nil：只接受表 FQN（grants-apply 未接语义层时的保守形态）。
-func expandTarget(ctx context.Context, st *store.Store, expand Expander, user, target string) (expandResult, error) {
+func expandTarget(ctx context.Context, expand Expander, user, target string) (expandResult, error) {
 	// 通配与指标/概念形态都走 Expander；表 FQN 直接落库。
 	if !strings.Contains(target, ":") {
 		if err := ValidateFQN(target); err != nil {
@@ -49,20 +49,20 @@ func expandTarget(ctx context.Context, st *store.Store, expand Expander, user, t
 
 // expandAll 展开整个 grants 文件，产出目标表授权集合与通配声明集合。
 // 任一对象展开失败 = 整体失败（原子拒绝：编译期拒绝，不写库）。
-func expandAll(ctx context.Context, st *store.Store, expand Expander, f File) (map[string]struct{}, map[string]struct{}, error) {
+func expandAll(ctx context.Context, expand Expander, f File) (map[string]struct{}, map[string]struct{}, error) {
 	targets := map[string]struct{}{}  // user\x00tableFQN
 	patterns := map[string]struct{}{} // user\x00pattern
 	for _, g := range f.Grants {
 		for _, t := range g.Tables {
-			res, err := expandTarget(ctx, st, expand, g.User, t)
+			res, err := expandTarget(ctx, expand, g.User, t)
 			if err != nil {
 				return nil, nil, err
 			}
 			if res.pattern != "" {
-				patterns[g.User+"\x00"+res.pattern] = struct{}{}
+				patterns[expandKey(g.User, res.pattern)] = struct{}{}
 			}
 			for _, tbl := range res.tables {
-				targets[g.User+"\x00"+tbl] = struct{}{}
+				targets[expandKey(g.User, tbl)] = struct{}{}
 			}
 		}
 	}
@@ -84,7 +84,7 @@ func SyncPatterns(ctx context.Context, st *store.Store) ([]string, error) {
 		if err := rows.Scan(&u, &p); err != nil {
 			return nil, fmt.Errorf("scan pattern: %w", err)
 		}
-		out = append(out, u+"\x00"+p)
+		out = append(out, expandKey(u, p))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

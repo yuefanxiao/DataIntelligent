@@ -122,6 +122,7 @@ type Diff struct {
 	EntitiesDeleted []Entity // 目标里消失 → 墓碑
 
 	RelationsAdded   []Relation
+	RelationsUpdated []Relation // 键相同但 meta（references 的 join 条件）变化
 	RelationsDeleted []Relation
 
 	EnumsAdded   []EnumValue
@@ -132,14 +133,14 @@ type Diff struct {
 func (d *Diff) Empty() bool {
 	return len(d.EntitiesAdded) == 0 && len(d.EntitiesUpdated) == 0 &&
 		len(d.EntitiesDeleted) == 0 && len(d.RelationsAdded) == 0 &&
-		len(d.RelationsDeleted) == 0 && len(d.EnumsAdded) == 0 &&
-		len(d.EnumsDeleted) == 0
+		len(d.RelationsUpdated) == 0 && len(d.RelationsDeleted) == 0 &&
+		len(d.EnumsAdded) == 0 && len(d.EnumsDeleted) == 0
 }
 
 // Count 返回变更条目总数（CLI 摘要输出用）。
 func (d *Diff) Count() int {
 	return len(d.EntitiesAdded) + len(d.EntitiesUpdated) + len(d.EntitiesDeleted) +
-		len(d.RelationsAdded) + len(d.RelationsDeleted) +
+		len(d.RelationsAdded) + len(d.RelationsUpdated) + len(d.RelationsDeleted) +
 		len(d.EnumsAdded) + len(d.EnumsDeleted)
 }
 
@@ -164,38 +165,41 @@ func Compare(target *Target, cur *Target) *Diff {
 	}
 
 	curRel := byRelationKey(cur.Relations)
+	targetRel := byRelationKey(target.Relations)
 	for _, r := range target.Relations {
-		if _, ok := curRel[relationKey(r)]; !ok {
+		if prev, ok := curRel[relationKey(r)]; ok {
+			if prev.Meta != r.Meta {
+				d.RelationsUpdated = append(d.RelationsUpdated, r)
+			}
+		} else {
 			d.RelationsAdded = append(d.RelationsAdded, r)
 		}
 	}
 	for _, r := range cur.Relations {
-		if _, ok := byRelationKey(target.Relations)[relationKey(r)]; !ok {
+		if _, ok := targetRel[relationKey(r)]; !ok {
 			d.RelationsDeleted = append(d.RelationsDeleted, r)
 		}
 	}
 
 	curEnum := byEnumKey(cur.Enums)
+	targetEnum := byEnumKey(target.Enums)
 	for _, v := range target.Enums {
 		if prev, ok := curEnum[enumKey(v)]; !ok || prev.Label != v.Label {
-			if !ok {
-				d.EnumsAdded = append(d.EnumsAdded, v)
-			} else {
-				d.EnumsAdded = append(d.EnumsAdded, v) // label 变化 = 按新增处理（upsert 幂等）
-			}
+			d.EnumsAdded = append(d.EnumsAdded, v) // 新增或 label 变化都按新增（upsert 幂等）
 		}
 	}
 	for _, v := range cur.Enums {
-		if _, ok := byEnumKey(target.Enums)[enumKey(v)]; !ok {
+		if _, ok := targetEnum[enumKey(v)]; !ok {
 			d.EnumsDeleted = append(d.EnumsDeleted, v)
 		}
 	}
 	return d
 }
 
-// entityChanged 比较实体属性（FQN 与 kind 是键，不比）。
+// entityChanged 比较实体属性（FQN 是键；kind 变化 = 属性变化——同一 FQN
+// 换类型必须进 diff，否则 apply 会改写 kind 而 dry-run 无感）。
 func entityChanged(a, b Entity) bool {
-	return a.Name != b.Name || a.Description != b.Description ||
+	return a.Kind != b.Kind || a.Name != b.Name || a.Description != b.Description ||
 		a.DataType != b.DataType || a.IsTime != b.IsTime ||
 		a.PGSchema != b.PGSchema || a.Expression != b.Expression ||
 		a.Aggregation != b.Aggregation || a.Filter != b.Filter

@@ -1,0 +1,16 @@
+# 全局业务概念（样例）——业务语言的入口（双入口检索：搜「支付失败」命中概念）。
+#
+# 约定：概念 FQN = 单段名字（独立命名空间）；describes 指向表/列/指标
+# （describes 边，编译期校验引用完整性；概念授权展开为这些实体的表授权）。
+version: 1
+concepts:
+  - name: payment_failure
+    description: 支付失败——支付单状态为 failed 的业务情形
+    describes:
+      - payment-service.payment_db.payments.status
+      - payment_failure_rate
+  - name: payment_order
+    description: 支付订单——支付单与其关联订单的业务对象
+    describes:
+      - payment-service.payment_db.payments
+      - order-service.order_db.orders

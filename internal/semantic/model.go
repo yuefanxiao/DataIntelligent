@@ -9,8 +9,9 @@
 //     运行时只查 SQLite 不查 YAML（ADR-0002「运行时只查运行时存储」）。
 //
 // FQN 命名空间（ADR-0001「稳定 FQN」）：服务 / 服务.库 / 服务.库.表 /
-// 服务.库.表.列 四级拓扑 + 指标/概念两个单段独立命名空间；表 FQN 与
-// dgw_table_grants.table_fqn 同一命名空间（权限挂载点）。
+// 服务.库.表.列 四级拓扑 + 指标/概念两个命名空间（单段名字，不点分）。
+// FQN 全库唯一（含指标/概念）：get_entity 的精确查询以 FQN 为键，同名
+// 必歧义；表 FQN 与 dgw_table_grants.table_fqn 同一命名空间（权限挂载点）。
 package semantic
 
 import (
@@ -43,10 +44,8 @@ const (
 
 // 命名空间段数（grants.ValidateFQN 的 3 段表 FQN 与本定义同源）。
 const (
-	SegService  = 1
-	SegDatabase = 2
-	SegTable    = 3
-	SegColumn   = 4
+	SegTable  = 3
+	SegColumn = 4
 )
 
 // ErrRefMissing 是引用完整性错误（编译期）：YAML 引用了不存在的实体。
@@ -86,25 +85,12 @@ type Relation struct {
 	Meta   string // references 的 on 条件等
 }
 
-// JoinCondition 返回 references 边的 join 条件（on 子句）。
-func (r Relation) JoinCondition() string {
-	if r.Type != RelReferences {
-		return ""
-	}
-	return r.Meta
-}
-
 // Target 是编译产物：一次同步管线的目标全量状态（六类实体 + 边 + 枚举）。
 // diff 与 apply 都以它为输入；同输入重跑产出确定的目标（§5.3 seam）。
 type Target struct {
 	Entities  []Entity
 	Relations []Relation
 	Enums     []EnumValue
-}
-
-// ServiceName 返回数据库实体的所属服务（FQN 第一段）。
-func (e Entity) ServiceName() string {
-	return strings.SplitN(e.FQN, ".", 2)[0]
 }
 
 // EntityFQN 按层级拼接 FQN（parts 非空、每段非空）。

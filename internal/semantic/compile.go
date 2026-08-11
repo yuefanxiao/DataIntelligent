@@ -180,9 +180,10 @@ func (c *compiler) compileMetric(m metricDef) error {
 	return nil
 }
 
-// checkMetricSQL 校验指标 expression 可解析（ADR-0001「指标表达式机器可读、
-// 供 dry-run 校验直接使用」）：包成 SELECT 目标列表用 PG 解析器验证。
-// 语法失败 = 编译错误（原子拒绝）。
+// checkMetricSQL 校验指标口径可解析（ADR-0001「指标表达式机器可读、
+// 供 dry-run 校验直接使用」；spec §4.1 口径 = 表达式 + 聚合 + 过滤）：
+// expression 与 filter 都是拼进查询的 SQL 片段，分别包成 SELECT 目标列与
+// WHERE 条件用 PG 解析器验证。语法失败 = 编译错误（原子拒绝）。
 func (c *compiler) checkMetricSQL(m metricDef) error {
 	if strings.TrimSpace(m.Expression) == "" {
 		return fmt.Errorf("指标 %q 的 expression 为空（口径必须 machine-readable）", m.Name)
@@ -192,6 +193,14 @@ func (c *compiler) checkMetricSQL(m metricDef) error {
 	probe := "SELECT " + m.Expression
 	if err := parseProbe(probe); err != nil {
 		return fmt.Errorf("指标 %q 的 expression 不可解析: %v", m.Name, err)
+	}
+	if strings.TrimSpace(m.Filter) != "" {
+		// filter 是 WHERE 条件片段，同样必须可解析（写坏的过滤会在
+		// get_metric_definition 的 dry-run 展开时炸，编译期拒绝更早暴露）。
+		probeFilter := "SELECT 1 FROM (SELECT 1) _t WHERE " + m.Filter
+		if err := parseProbe(probeFilter); err != nil {
+			return fmt.Errorf("指标 %q 的 filter 不可解析: %v", m.Name, err)
+		}
 	}
 	return nil
 }

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yuefanxiao/DataIntelligent/internal/config"
@@ -443,6 +444,9 @@ func printDiff(d *semantic.Diff) {
 	for _, r := range d.RelationsAdded {
 		fmt.Printf("  + 边 %s %s → %s\n", r.Type, r.SrcFQN, r.DstFQN)
 	}
+	for _, r := range d.RelationsUpdated {
+		fmt.Printf("  ~ 边 %s %s → %s（join 条件变化）\n", r.Type, r.SrcFQN, r.DstFQN)
+	}
 	for _, r := range d.RelationsDeleted {
 		fmt.Printf("  - 边 %s %s → %s（墓碑）\n", r.Type, r.SrcFQN, r.DstFQN)
 	}
@@ -454,9 +458,13 @@ func printDiff(d *semantic.Diff) {
 	}
 }
 
-// warnPatternCoverage 检查通配授权快照是否覆盖当前全部表：未覆盖的表 =
-// 新表默认拒绝，提示重跑 grants-apply 重展开（ADR-0004「新表默认拒绝 +
-// 管线告警 + 重展开确认」）。
+// warnPatternCoverage 检查通配授权快照是否覆盖当前全部表：对每条通配声明
+// （user × pattern）逐项检查「该模式下的表」是否都有该用户的授权——未覆盖
+// 的表 = 新表默认拒绝，提示重跑 grants-apply 重展开（ADR-0004「新表默认
+// 拒绝 + 管线告警 + 重展开确认」）。
+//
+// 按 user×pattern 逐项而非跨用户汇总：用户 A 的 service:x 快照过期时，即使
+// 用户 B 恰好持有该表，A 的告警也必须报出（过期的是 A 的展开面）。
 func warnPatternCoverage(ctx context.Context, st *store.Store) {
 	patterns, err := grants.SyncPatterns(ctx, st)
 	if err != nil {
@@ -466,31 +474,59 @@ func warnPatternCoverage(ctx context.Context, st *store.Store) {
 	if len(patterns) == 0 {
 		return
 	}
-	tables, err := semantic.ListTables(ctx, st)
-	if err != nil {
-		log.Printf("读取表清单失败（跳过覆盖检查）: %v", err)
-		return
-	}
-	covered := map[string]bool{}
+	// 用户 × 表授权集合（覆盖判定面）。
+	userGrants := map[string]map[string]bool{}
 	grantsList, err := grants.Snapshot(ctx, st)
 	if err != nil {
 		log.Printf("读取授权快照失败（跳过覆盖检查）: %v", err)
 		return
 	}
 	for _, g := range grantsList {
-		covered[g.TableFQN] = true
+		if userGrants[g.User] == nil {
+			userGrants[g.User] = map[string]bool{}
+		}
+		userGrants[g.User][g.TableFQN] = true
 	}
-	// 通配声明的展开面：授权快照里任意用户覆盖即视为已展开（告警面向
-	// 「表不在任何快照里」，不是逐用户）。
+
 	uncovered := 0
-	for _, t := range tables {
-		if !covered[t.FQN] {
-			uncovered++
+	for _, up := range patterns {
+		user, pattern := splitPattern(up)
+		var tables []string
+		switch {
+		case strings.HasPrefix(pattern, "service:"):
+			tables, err = semantic.TablesForService(ctx, st, strings.TrimPrefix(pattern, "service:"))
+		case strings.HasPrefix(pattern, "database:"):
+			tables, err = semantic.TablesForDatabase(ctx, st, strings.TrimPrefix(pattern, "database:"))
+		default:
+			log.Printf("未知通配声明 %q（跳过）", pattern)
+			continue
+		}
+		if err != nil {
+			log.Printf("通配覆盖检查失败（%s）: %v", pattern, err)
+			continue
+		}
+		have := userGrants[user]
+		for _, tbl := range tables {
+			if !have[tbl] {
+				uncovered++
+				log.Printf("管线告警：用户 %s 的通配 %s 未覆盖新表 %s（默认拒绝；重跑 grants-apply 触发重展开确认）",
+					user, pattern, tbl)
+			}
 		}
 	}
 	if uncovered > 0 {
-		log.Printf("管线告警：%d 张新表不在通配授权快照中（默认拒绝）；重跑 grants-apply 触发重展开确认", uncovered)
+		log.Printf("共 %d 张新表不在通配授权快照中（默认拒绝）", uncovered)
 	}
+}
+
+// splitPattern 拆开 user\x00pattern（与 grants 包内建键同构）。
+func splitPattern(k string) (user, pattern string) {
+	for i := 0; i < len(k); i++ {
+		if k[i] == 0 {
+			return k[:i], k[i+1:]
+		}
+	}
+	return k, ""
 }
 
 // cmdSemanticBackup 备份运行时存储：WAL checkpoint + 文件拷贝（ADR-0005）。

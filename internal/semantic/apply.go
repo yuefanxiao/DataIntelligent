@@ -16,7 +16,9 @@ import (
 // 全部变更在单事务内完成：失败原子回滚（编译校验已在 Sync 里先行，此处
 // 只做落库，失败即库级异常，不留半态）。
 //
-// 返回值 = 实际应用的行数（变更过的 upsert + 墓碑），供 CLI 摘要。
+// ApplyStats 的计数 = 处理行数（目标里每个实体/边/枚举各记一次 upsert，
+// 无论是否有净变化），不是净 diff 数——幂等重跑时 upsert 计数不为 0，
+// 但 Diff 全空（「同输入同输出」的判定以 Diff 为准，§5.3 seam）。
 type ApplyStats struct {
 	EntitiesUpserted    int
 	EntitiesTombstoned  int
@@ -48,9 +50,9 @@ func Apply(ctx context.Context, st interface{ DB() *sql.DB }, target *Target, cu
 
 func applyInTx(ctx context.Context, tx *sql.Tx, target *Target, cur *Target) (*ApplyStats, error) {
 	s := &ApplyStats{}
-	curEnt := byEntityFQN(cur.Entities)
-	curRel := byRelationKey(cur.Relations)
-	curEnum := byEnumKey(cur.Enums)
+	targetEnt := byEntityFQN(target.Entities)
+	targetRel := byRelationKey(target.Relations)
+	targetEnum := byEnumKey(target.Enums)
 
 	// 1) 实体 upsert（含墓碑复活：target 里存在 = 恢复）。
 	for _, e := range target.Entities {
@@ -76,10 +78,7 @@ func applyInTx(ctx context.Context, tx *sql.Tx, target *Target, cur *Target) (*A
 
 	// 2) 实体墓碑：目标里消失的（含当前墓碑但不在目标 = 保持墓碑）。
 	for _, e := range cur.Entities {
-		if _, ok := curEnt[e.FQN]; !ok {
-			continue // 防御：cur 自身键必然存在
-		}
-		if hasEntity(target.Entities, e.FQN) {
+		if _, ok := targetEnt[e.FQN]; ok {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -108,10 +107,7 @@ func applyInTx(ctx context.Context, tx *sql.Tx, target *Target, cur *Target) (*A
 
 	// 4) 边墓碑：目标里消失的边；同时墓碑化「边指向的实体已墓碑」的残留边。
 	for _, r := range cur.Relations {
-		if _, ok := curRel[relationKey(r)]; !ok {
-			continue
-		}
-		if _, ok := byRelationKey(target.Relations)[relationKey(r)]; ok {
+		if _, ok := targetRel[relationKey(r)]; ok {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -139,10 +135,7 @@ func applyInTx(ctx context.Context, tx *sql.Tx, target *Target, cur *Target) (*A
 
 	// 6) 枚举墓碑：目标里消失的枚举。
 	for _, v := range cur.Enums {
-		if _, ok := curEnum[enumKey(v)]; !ok {
-			continue
-		}
-		if _, ok := byEnumKey(target.Enums)[enumKey(v)]; ok {
+		if _, ok := targetEnum[enumKey(v)]; ok {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,

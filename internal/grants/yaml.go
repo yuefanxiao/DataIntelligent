@@ -94,7 +94,7 @@ type SyncResult struct {
 // 回到 YAML 状态（git review 即权限变更评审闸门）。
 func Sync(ctx context.Context, st *store.Store, f File, expand Expander) (SyncResult, error) {
 	// 展开阶段先行：任一对象展开失败 = 整体原子拒绝（不写库）。
-	targets, patterns, err := expandAll(ctx, st, expand, f)
+	targets, patterns, err := expandAll(ctx, expand, f)
 	if err != nil {
 		return SyncResult{}, err
 	}

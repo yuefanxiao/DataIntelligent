@@ -283,6 +283,52 @@ func TestSyncTombstonePropagation(t *testing.T) {
 	}
 }
 
+// references 的 join 条件（meta）变化必须进 dry-run diff——Apply 的
+// ON CONFLICT 会真的改写 meta，diff 与 apply 不一致 = 幂等重跑输出失真
+// （review 修复：Compare 增加 RelationsUpdated）。
+func TestSyncRelationMetaChangeInDiff(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	dir1 := sampleDir(t)
+	if _, err := Sync(ctx, st, dir1); err != nil {
+		t.Fatalf("Sync v1: %v", err)
+	}
+
+	// 改 join 条件（on 子句变化）
+	changed := strings.Replace(sampleServices,
+		`on: "payments.order_id = orders.id"`,
+		`on: "payments.order_id = orders.id AND orders.status <> 'cancelled'"`, 1)
+	dir2 := writeSemantic(t, map[string]string{
+		"services/payment-service.yaml": changed,
+		"services/order-service.yaml":   sampleOrders,
+		"metrics.yaml":                  sampleMetrics,
+		"concepts.yaml":                 sampleConcepts,
+	})
+	res, err := DryRun(ctx, st, dir2)
+	if err != nil {
+		t.Fatalf("DryRun v2: %v", err)
+	}
+	if len(res.Diff.RelationsUpdated) != 1 {
+		t.Fatalf("join 条件变化应进 diff.RelationsUpdated, got %+v", res.Diff)
+	}
+	if len(res.Diff.RelationsAdded) != 0 || len(res.Diff.RelationsDeleted) != 0 {
+		t.Errorf("join 条件变化不应产生增删边: %+v", res.Diff)
+	}
+
+	// 应用后重跑 = 空 diff（幂等收敛）
+	if _, err := Sync(ctx, st, dir2); err != nil {
+		t.Fatalf("Sync v2: %v", err)
+	}
+	res3, err := DryRun(ctx, st, dir2)
+	if err != nil {
+		t.Fatalf("DryRun v3: %v", err)
+	}
+	if !res3.Diff.Empty() {
+		t.Errorf("应用后重跑应为空 diff: %+v", res3.Diff)
+	}
+}
+
 // 验收 2：编译校验——FQN 重复 / 引用缺失 / 指标 SQL 不可解析 / 枚举非法 →
 // 原子拒绝（错误返回且零写库）。
 func TestCompileRejects(t *testing.T) {
@@ -346,6 +392,27 @@ databases:
 `,
 			},
 			want: "不可解析",
+		},
+		{
+			name: "指标 filter 不可解析",
+			files: map[string]string{
+				"metrics.yaml": `version: 1
+metrics:
+  - name: badfilter
+    expression: "COUNT(*)"
+    filter: "status = AND ("
+    tables:
+      - svc.db.t1
+`,
+				"services/a.yaml": `version: 1
+service: svc
+databases:
+  - name: db
+    tables:
+      - name: t1
+`,
+			},
+			want: "filter 不可解析",
 		},
 		{
 			name: "枚举非法（value 为空）",
