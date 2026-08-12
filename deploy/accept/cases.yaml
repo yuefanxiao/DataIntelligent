@@ -612,6 +612,11 @@ cases:
           eq: dashboard-backend
         - path: nodes[0].kind
           eq: service
+        # 拓扑如实的可检验断言：edges 为空 = 确实无 contains 边（遍历
+        # 节点按 FQN 排序，起点是任何后代的前缀恒排首位——仅断言
+        # nodes[0].fqn 验不出「无 contains 边」，edges 空数组才闭环）。
+        - path: edges
+          eq: []
   - id: ops-001
     name: ops-operation 简单——服务实体可达（get_entity）
     modes: [http, stdio]
@@ -655,6 +660,8 @@ cases:
           eq: ops-operation
         - path: nodes[0].kind
           eq: service
+        - path: edges
+          eq: []
   - id: usage-001
     name: usage-collection 简单——服务实体可达（get_entity）
     modes: [http, stdio]
@@ -698,6 +705,8 @@ cases:
           eq: usage-collection
         - path: nodes[0].kind
           eq: service
+        - path: edges
+          eq: []
 
   # ── §6.3 负向例 1：未授权表拒绝 ────────────────────────────────────────
   - id: neg-001a
@@ -738,6 +747,23 @@ cases:
       status: rejected
       kind: permission_denied
       reason: unknown_table
+  # 授权展开的负向（spec §6.2 校验层硬路径的安全方向）：多表引用不是只
+  # 查首表——CTE 体里的未授权表也必须被拒绝（authorize 逐表展开）。
+  # 正向覆盖在矩阵复杂用例（join/CTE/子查询全授权表），这里补「展开
+  # 少查表」回归：校验层若退化为只查首表，本用例会从 not_granted 变成
+  # 成功，立即暴露。
+  - id: neg-006
+    name: 授权展开负向——CTE 引用未授权表（多表引用逐表展开，非只查首表）
+    modes: [http, stdio]
+    tool: execute_sql
+    key: dev-alice
+    args:
+      sql: "WITH u AS (SELECT id FROM users) SELECT count(*) AS n FROM organizations o JOIN u ON o.owner_user_id = 'user-' || u.id"
+      dbname: iam
+    expect:
+      status: rejected
+      kind: permission_denied
+      reason: not_granted
 
   # ── §6.3 负向例 2：非 SELECT 拒绝（AST 分类拒绝集）─────────────────────
   - id: neg-002

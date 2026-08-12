@@ -953,6 +953,20 @@ func eqValue(got any, want any) bool {
 		return ok && g == w
 	case nil:
 		return got == nil
+	case []any:
+		// 数组断言（如 traverse_relations 的 `edges: eq: []`）：长度 +
+		// 逐元素递归比较（元素为对象时递归到其余分支，map 深度比较不
+		// 在支持面——「空数组/等长数组」场景即覆盖）。
+		g, ok := got.([]any)
+		if !ok || len(g) != len(w) {
+			return false
+		}
+		for i := range w {
+			if !eqValue(g[i], w[i]) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

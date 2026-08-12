@@ -206,6 +206,14 @@ func TestEqValue(t *testing.T) {
 		{true, false, false},
 		{nil, nil, true},
 		{"x", nil, false},
+		// 数组分支（traverse_relations 的 `edges: eq: []` 场景）。
+		{[]any{}, []any{}, true},
+		{[]any{"a"}, []any{}, false},
+		{[]any{}, []any{"a"}, false},
+		{[]any{"a", "b"}, []any{"a", "b"}, true},
+		{[]any{"a", "b"}, []any{"a", "c"}, false},
+		{[]any{json.Number("1")}, []any{1}, true},
+		{"not-an-array", []any{}, false},
 	}
 	for _, tc := range cases {
 		if got := eqValue(tc.got, tc.want); got != tc.wantOK {

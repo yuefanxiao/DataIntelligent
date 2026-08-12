@@ -75,11 +75,12 @@ dashboard-backend / ops-operation / usage-collection 是聚合网关/编排/采�
 三类用例在验收环境与真实环境（语义同步后）行为一致，兼作采集回归的
 「服务实体存在性」断言。
 
-## 3. 负向/边界 5 例（§6.3，build 12 保留，neg-005 换域）
+## 3. 负向/边界 6 例（§6.3，build 12 保留，neg-005 换域，build 14 增 neg-006）
 
 | 用例 | 断言 | build 14 变更 |
 |---|---|---|
 | neg-001a/b/c 未授权表拒绝 | ghost / 无表授权 / 非 public schema 引用 → permission_denied + not_granted / unknown_table | 不变 |
+| **neg-006 授权展开负向** | CTE 引用未授权表（`WITH u AS (SELECT … FROM users)` + join）→ not_granted——多表引用逐表展开，不是只查首表（校验层硬路径的安全方向：若授权退化为只查首表，本用例从 not_granted 变成功，立即暴露） | **新增（build 14）** |
 | neg-002 非 SELECT 拒绝 | DML/DDL/COPY/utility 六句 → invalid_request/non_select | 不变 |
 | trunc-001/002 LIMIT 截断 | >500 默认上限 / >5000 硬上限 + truncated + psql 有界对照 | 不变 |
 | conc-001/002 并发超限 | 同 key >2 / 进程级 >8 → rate_limited（不排队） | 不变 |
@@ -110,7 +111,11 @@ dashboard-backend / ops-operation / usage-collection 是聚合网关/编排/采�
 
 ## 5. golden 语料复用契约（09 采集回归）
 
-用例 = 工具调用 + 期望断言，与数据存储无关，可被采集回归直接复用：
+用例 = 工具调用 + 期望断言，兼作 golden 语料。复用前提（如实声明）：
+**execute_sql 用例的行数/psql 对照断言强依赖 §4 的 fixture 数据与语义
+同步环境**——复用需在同一 fixture + 语义数据环境下重放（「与数据存储
+无关」只对语义工具用例成立：search/get_entity/traverse/
+get_metric_definition 的命中数/FQN/展开 SQL 断言与存储实现无关）：
 
 - **execute_sql 用例** = Agent 可执行查询的回归集：采集器/语义数据改动后
   重放，行数与 psql 对照即验证「语义描述没有骗人」；
