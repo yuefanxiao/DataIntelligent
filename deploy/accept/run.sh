@@ -7,15 +7,20 @@
 # 部分保持 sh 兼容写法。
 #
 #   1. 起 demo 主从 PG（独立 compose project dgw-accept，与 demo 栈隔离）
-#   2. 主库建 bill/iam 库 + 演示表/数据（orders 600 / big_events 6000 /
-#      iam.users），跑真实 provisioning（readonly-role.sql）
-#   3. 从库 WAL 追平后，构建 dgw + accept 二进制
-#   4. 凭据/授权（dev-alice 主用户 / ghost 无 grants 用户 / p1-p5 并发探测）
-#   5. 硬上限配置边界检查（DGW_SQL_LIMIT=5001 应拒启）
-#   6. 网关拉起（HTTP 不设 DGW_SQL_LIMIT 走 §4.9 默认 500 / stdio 限 5000
+#   2. 主库建 10 个持库 + 演示表/数据（orders 600 / big_events 6000 /
+#      iam.users）+ 矩阵 fixture（fixture.sql：13 服务矩阵用例的表与
+#      确定性数据），跑真实 provisioning（readonly-role.sql）
+#   3. 从库 WAL 追平（dgw_reader 可查从库）
+#   4. 构建 dgw + accept 二进制
+#   5. 语义数据同步（semantic-sync samples/semantic 进运行时；主用例
+#      检索/口径 dry-run 依赖）+ 凭据/授权（dev-alice 主用户 / ghost 无
+#      grants 用户 / p1-p5 并发探测；矩阵表逐表授权）
+#   6. 硬上限配置边界检查（DGW_SQL_LIMIT=5001 应拒启）
+#   7. 网关拉起（HTTP 不设 DGW_SQL_LIMIT 走 §4.9 默认 500 / stdio 限 5000
 #      双形态）→ harness 用例按序重放 → 判定三件套断言 → 报告留档
 #      （deploy/accept/reports/）
-#   7. 每形态重放复现（chain 快照从头重放 → 同状态同行数）
+#   8. 每形态重放复现（chain 快照从头重放 → 同状态同行数）
+#   9. 收尾（停 PG 栈）
 #
 # 依赖：docker、go、curl。PG 镜像拉不下来时可用
 #   DGW_PG_REGISTRY=docker.1ms.run/library 覆盖（测试环境镜像源）。
@@ -43,7 +48,7 @@ DGWBIN="$TMP/dgw"
 ACCEPT="$TMP/accept"
 HTTP_ADDR="127.0.0.1:$HTTP_PORT"
 HTTP_URL="http://$HTTP_ADDR"
-PG_ROUTES="[{\"dbname\":\"bill\",\"service\":\"bss-bill\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/bill?sslmode=disable\"},{\"dbname\":\"iam\",\"service\":\"iam\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/iam?sslmode=disable\"}]"
+PG_ROUTES="[{\"dbname\":\"bill\",\"service\":\"bss-bill\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/bill?sslmode=disable\"},{\"dbname\":\"wallet\",\"service\":\"bss-wallet\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/wallet?sslmode=disable\"},{\"dbname\":\"bss_invoice\",\"service\":\"bss-invoice\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/bss_invoice?sslmode=disable\"},{\"dbname\":\"subscription\",\"service\":\"bss-subscription\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/subscription?sslmode=disable\"},{\"dbname\":\"promotion\",\"service\":\"bss-promotion\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/promotion?sslmode=disable\"},{\"dbname\":\"iam\",\"service\":\"iam\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/iam?sslmode=disable\"},{\"dbname\":\"iam_audit\",\"service\":\"iam-audit\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/iam_audit?sslmode=disable\"},{\"dbname\":\"console\",\"service\":\"console\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/console?sslmode=disable\"},{\"dbname\":\"notification\",\"service\":\"notification\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/notification?sslmode=disable\"},{\"dbname\":\"ops_ticket\",\"service\":\"ops-ticket\",\"dsn\":\"postgres://dgw_reader:demo-ro-pass@127.0.0.1:${REPL_PORT}/ops_ticket?sslmode=disable\"}]"
 KEYS=""
 STATUS=0
 
@@ -99,12 +104,26 @@ psql_pri -d bill -c "CREATE TABLE big_events AS
 # iam 域：users（角色只读权有、dev-alice 表授权无 → neg-001b）
 psql_pri -d iam -c "CREATE TABLE users (id bigint PRIMARY KEY, name text NOT NULL)" >/dev/null
 psql_pri -d iam -c "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" >/dev/null
+# 13 服务用例矩阵 fixture（build 14）：10 个持库的真实表名 + 确定性数据
+# （全部相对 now() 的时间偏移——重放同日可复现）。表建在 public schema
+# （与 orders/big_events 同构；FQN 映射服务.库.表，docs/acceptance-cases.md
+# 记录形态约定）。先于 provisioning 执行——非 bss 库的 public 由其
+# ALL TABLES 覆盖，bss 域库的 public 由下方循环补授（见 provisioning 注释）。
+docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" cp fixture.sql pg-primary:/tmp/fixture.sql
+psql_pri -d postgres -v ON_ERROR_STOP=1 -f /tmp/fixture.sql >/dev/null
+echo "    fixture 完成：13 服务矩阵表 + 确定性数据（10 库）"
 # 真实 provisioning（可重放；ro_password 必填）——按生产形态（schema 前缀）
-# 授 SELECT；demo 表在 public，之后补授
+# 授 SELECT；非 bss 库的 demo/fixture 表（public）由其 ALL TABLES 覆盖
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" cp "$(cd ../provisioning && pwd)/readonly-role.sql" pg-primary:/tmp/readonly-role.sql
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" exec -T pg-primary sh -c \
   "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v ro_password=demo-ro-pass -f /tmp/readonly-role.sql"
-psql_pri -d bill -c "GRANT SELECT ON orders TO dgw_reader" -c "GRANT SELECT ON big_events TO dgw_reader" >/dev/null
+# bss 域 provisioning 只授同名 schema 前缀（生产形态：bill/wallet/…）；
+# demo + fixture 表在 public schema——逐库补授 public（含 orders/big_events，
+# 与「demo 表在 public，之后补授」同构；非 bss 库由 provisioning 的
+# ALL TABLES 覆盖，无需补授）。
+for db in bill wallet bss_invoice subscription promotion; do
+  psql_pri -d "$db" -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader" >/dev/null
+done
 echo "    provisioning 完成（角色 dgw_reader + 库只读 + 角色级 statement_timeout=30s）"
 
 echo "==> [3/9] 等从库 WAL 追平（dgw_reader 可查从库）..."
@@ -118,7 +137,7 @@ echo "    从库可读：orders = 600 行（角色/库/表/超时已复制）"
 echo "==> [4/9] 构建 dgw + accept 二进制..."
 ( cd ../.. && go build -o "$DGWBIN" ./cmd/dgw && go build -o "$ACCEPT" ./deploy/accept )
 
-echo "==> [5/9] 凭据 + 授权（key-create 明文仅打印一次，不落日志）..."
+echo "==> [5/9] 语义数据同步 + 凭据 + 授权（key-create 明文仅打印一次，不落日志）..."
 create_key() { # $1=user；输出明文 key；key-create 失败即退出（不吞退出码）。
   # key 生命周期记录落 $TMP/keylog（不污染网关日志目录）。
   local out
@@ -130,12 +149,44 @@ KEY_MAIN="$(create_key dev-alice)"
 KEY_GHOST="$(create_key ghost)"
 KEY_P1="$(create_key p1)"; KEY_P2="$(create_key p2)"; KEY_P3="$(create_key p3)"
 KEY_P4="$(create_key p4)"; KEY_P5="$(create_key p5)"
+# 语义数据同步进运行时（build 14）：主用例检索/口径 dry-run 依赖
+# samples/semantic（13 服务 + payment_failure_rate 指标 + 概念）。先于
+# 授权——grant-add 的残留授权告警依赖语义库已同步（warnStaleGrants）。
+# 检索确定性前提 = 无向量通道：unset DGW_OPENAI_API_KEY 密闭验收环境
+# （运行者 shell 导出的 key 会使 search_entities 开向量通道，命中数断言
+# 被向量额外命中破坏——README 已记录该前提，这里在脚本层强制）。
+unset DGW_OPENAI_API_KEY DGW_EMBEDDING_MODEL
+"$DGWBIN" semantic-sync --dir "$(cd ../.. && pwd)/samples/semantic" --db "$TMP/dgw.db" >/dev/null
+echo "    语义数据已同步（samples/semantic → 运行时存储）"
 "$DGWBIN" grant-add --user dev-alice --table bss-bill.bill.orders --db "$TMP/dgw.db" >/dev/null
 "$DGWBIN" grant-add --user dev-alice --table bss-bill.bill.big_events --db "$TMP/dgw.db" >/dev/null
+# 矩阵 fixture 表逐表授权（13 服务用例矩阵的 execute_sql 用例；FQN =
+# 服务.库.表，与语义数据一致）。列表 = fixture.sql 建的表。
+for t in \
+  bss-bill.bill.bills bss-bill.bill.settlement_batches bss-bill.bill.settlement_attempts \
+  bss-wallet.wallet.wallet_accounts bss-wallet.wallet.payment_orders \
+  bss-wallet.wallet.wallet_transactions bss-wallet.wallet.refund_orders \
+  bss-invoice.bss_invoice.invoice_applications bss-invoice.bss_invoice.tax_invoices \
+  bss-invoice.bss_invoice.invoice_files \
+  bss-subscription.subscription.model_pricing bss-subscription.subscription.tier_policy_versions \
+  bss-subscription.subscription.tier_policy_items \
+  bss-promotion.promotion.code_batches bss-promotion.promotion.codes \
+  bss-promotion.promotion.code_redemptions \
+  iam.iam.organizations iam.iam.organization_memberships \
+  iam-audit.iam_audit.audit_logs iam-audit.iam_audit.audit_exports \
+  console.console.approval_cases console.console.org_groups console.console.org_group_members \
+  notification.notification.email_deliveries notification.notification.email_delivery_attempts \
+  ops-ticket.ops_ticket.support_tickets ops-ticket.ops_ticket.support_ticket_sources; do
+  "$DGWBIN" grant-add --user dev-alice --table "$t" --db "$TMP/dgw.db" >/dev/null
+done
 for u in p1 p2 p3 p4 p5; do
   "$DGWBIN" grant-add --user "$u" --table bss-bill.bill.orders --db "$TMP/dgw.db" >/dev/null
 done
-echo "    用户：dev-alice（主）/ ghost（无 grants）/ p1-p5（并发探测）"
+# 授权列表与 fixture 建表数自检（防漂移：新表漏授权 = 用例 permission_denied
+# 但错误可能被误读为用例问题；计数不符 = 显式失败，错误响亮）
+[ "$(grep -c '^CREATE TABLE' fixture.sql)" -eq 27 ] \
+  || { echo "fixture 建表数（$(grep -c '^CREATE TABLE' fixture.sql)）与授权列表（27）不一致" >&2; exit 1; }
+echo "    用户：dev-alice（主 + 矩阵 27 表）/ ghost（无 grants）/ p1-p5（并发探测）"
 KEYS="dev-alice=$KEY_MAIN,ghost=$KEY_GHOST,p1=$KEY_P1,p2=$KEY_P2,p3=$KEY_P3,p4=$KEY_P4,p5=$KEY_P5"
 
 echo "==> [6/9] 硬上限配置边界（DGW_SQL_LIMIT=5001 应拒启，§4.9）..."

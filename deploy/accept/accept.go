@@ -1123,7 +1123,29 @@ func compareCell(colType, psql string, gw any) string {
 			return "timestamptz 不一致"
 		}
 		return ""
-	case "timestamp", "date", "time", "timetz", "interval":
+	case "date":
+		// PG date 无时区：psql 渲染 YYYY-MM-DD；网关侧 pgx v5 把 date 解码
+		// 为 time.Time 时无条件用 UTC 午夜（pgtype date 固定 UTC，与会话
+		// 时区无关）→ JSON RFC3339（YYYY-MM-DDT00:00:00Z）。两侧均为
+		// UTC 午夜即时点比较，等价日历日比较。矩阵的按天聚合用例
+		// date_trunc('day', …)::date 全走此类型。
+		gs, ok := gw.(string)
+		if !ok {
+			return "date 网关值非文本"
+		}
+		pt, err1 := time.Parse("2006-01-02", psql)
+		gt, err2 := time.Parse(time.RFC3339, gs)
+		if err1 != nil {
+			return "date psql 解析失败: " + psql
+		}
+		if err2 != nil {
+			return "date 网关解析失败: " + gs
+		}
+		if !pt.Equal(gt) {
+			return "date 不一致"
+		}
+		return ""
+	case "timestamp", "time", "timetz", "interval":
 		gs, ok := gw.(string)
 		if !ok || gs != psql {
 			return colType + " 不一致"

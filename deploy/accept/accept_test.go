@@ -83,6 +83,29 @@ func TestCompareCellTimestamptz(t *testing.T) {
 	}
 }
 
+func TestCompareCellDate(t *testing.T) {
+	// PG date 无时区：psql 渲染 YYYY-MM-DD，网关 pgx 解码为 time.Time →
+	// JSON RFC3339。验收环境 PG 会话时区 = UTC，两侧均为 UTC 午夜 →
+	// 即时点比较等价于日历日比较。
+	for _, tc := range []struct {
+		psql, gw string
+		wantOK   bool
+	}{
+		{"2026-08-04", "2026-08-04T00:00:00Z", true},
+		{"2026-08-04", "2026-08-04T00:00:00+00:00", true},
+		{"2026-08-04", "2026-08-05T00:00:00Z", false},
+		{"2026-08-04", "2026-08-04T00:00:00", false}, // 非 RFC3339（缺时区）
+		{"2026-08-04", "2026-08-04", false},           // 网关侧不应出现 date-only 渲染
+		{"2026/08/04", "2026-08-04T00:00:00Z", false}, // psql 侧渲染异常
+		{"2026-08-04", "not-a-time", false},           // 网关侧渲染异常
+	} {
+		got := compareCell("date", tc.psql, tc.gw)
+		if (got == "") != tc.wantOK {
+			t.Errorf("date %q vs %q = %q, wantOK=%v", tc.psql, tc.gw, got, tc.wantOK)
+		}
+	}
+}
+
 func TestCompareCellNull(t *testing.T) {
 	if got := compareCell("text", "", nil); got != "" {
 		t.Errorf("null 对照: %q", got)
