@@ -1,5 +1,5 @@
 #!/bin/bash
-# 验收重放编排（v1 build 12；spec §5 测试决策主 seam / §6.3 负向边界 5 例 /
+# 验收重放编排（v1 build 12；spec §5 测试决策主 seam / §6.3 负向边界 6 例 /
 # §6.4 判定三件套 / §6.5 执行方式）。
 #
 # 注：shebang 用 bash 而非仓库惯例的 sh——需要进程替换
@@ -162,6 +162,7 @@ echo "    语义数据已同步（samples/semantic → 运行时存储）"
 "$DGWBIN" grant-add --user dev-alice --table bss-bill.bill.big_events --db "$TMP/dgw.db" >/dev/null
 # 矩阵 fixture 表逐表授权（13 服务用例矩阵的 execute_sql 用例；FQN =
 # 服务.库.表，与语义数据一致）。列表 = fixture.sql 建的表。
+GRANTS=""
 for t in \
   bss-bill.bill.bills bss-bill.bill.settlement_batches bss-bill.bill.settlement_attempts \
   bss-wallet.wallet.wallet_accounts bss-wallet.wallet.payment_orders \
@@ -178,14 +179,20 @@ for t in \
   notification.notification.email_deliveries notification.notification.email_delivery_attempts \
   ops-ticket.ops_ticket.support_tickets ops-ticket.ops_ticket.support_ticket_sources; do
   "$DGWBIN" grant-add --user dev-alice --table "$t" --db "$TMP/dgw.db" >/dev/null
+  GRANTS="$GRANTS $t"
 done
 for u in p1 p2 p3 p4 p5; do
   "$DGWBIN" grant-add --user "$u" --table bss-bill.bill.orders --db "$TMP/dgw.db" >/dev/null
 done
-# 授权列表与 fixture 建表数自检（防漂移：新表漏授权 = 用例 permission_denied
-# 但错误可能被误读为用例问题；计数不符 = 显式失败，错误响亮）
-[ "$(grep -c '^CREATE TABLE' fixture.sql)" -eq 27 ] \
-  || { echo "fixture 建表数（$(grep -c '^CREATE TABLE' fixture.sql)）与授权列表（27）不一致" >&2; exit 1; }
+# 授权列表与 fixture 建表自检（防漂移，fail fast）：fixture 每张表都必须
+# 有授权——漏授权 = 用例 permission_denied，错误可能被误读为用例问题；
+# 表名级比对（FQN 后缀 .<表名>）比计数比对更严格（换表也能抓到）。
+for _t in $(grep -oE 'CREATE TABLE [a-z_]+' fixture.sql | awk '{print $3}'); do
+  case "$GRANTS " in
+    *".$_t "*) : ;;
+    *) echo "fixture 表 $_t 未在授权列表（grant-add 27 表）中——请同步 run.sh 授权列表" >&2; exit 1 ;;
+  esac
+done
 echo "    用户：dev-alice（主 + 矩阵 27 表）/ ghost（无 grants）/ p1-p5（并发探测）"
 KEYS="dev-alice=$KEY_MAIN,ghost=$KEY_GHOST,p1=$KEY_P1,p2=$KEY_P2,p3=$KEY_P3,p4=$KEY_P4,p5=$KEY_P5"
 

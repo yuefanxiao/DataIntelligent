@@ -6,8 +6,8 @@ MCP 往返；用例按序重放 → 判定三件套逐项断言 → 报告留档
 团队评审用）。只测外部行为（工具协议层）、不测实现细节（spec §5 测试哲学）。
 
 build 14 起验收环境带语义数据（run.sh semantic-sync 同步 samples/semantic
-进运行时）与矩阵 fixture（fixture.sql），用例 52 条 = 主用例（1）+ 13 服务
-矩阵（39 例）+ 负向 5 例 + 边界 4 例（截断 2 + 并发 2）+ 正向基础 3 例；
+进运行时）与矩阵 fixture（fixture.sql），用例 53 条 = 主用例（1）+ 13 服务
+矩阵（39 例）+ 负向 6 例 + 边界 4 例（截断 2 + 并发 2）+ 正向基础 3 例；
 人读清单见 docs/acceptance-cases.md。
 
 已知限制：相对时间窗口（date_trunc('day', now())）意味着主运行与重放
@@ -62,11 +62,12 @@ cd deploy/accept
 顺序重放不可复现，标记 `replay_skip` 跳过状态比对（执行记录仍在链上，
 完整性照查）。
 
-## 负向/边界 5 例（spec §6.3）
+## 负向/边界 6 例（spec §6.3）
 
 | 用例 | 断言 |
 |---|---|
 | `neg-001a/b/c` 未授权表拒绝 | ghost（无 grants）/ dev-alice（有角色读权无表授权）→ `permission_denied`/`not_granted`；非 public schema 引用 → `unknown_table`——「无权限表」的两种形态机器可区分 |
+| `neg-006` 授权展开负向 | CTE 引用未授权表（`WITH u AS (SELECT … FROM users)` + join）→ `not_granted`——多表引用逐表展开，不是只查首表（校验层硬路径的安全方向回归） |
 | `neg-002` 非 SELECT 拒绝 | DML/DDL/COPY/utility 六句 → `invalid_request`/`non_select`（AST 分类拒绝） |
 | `trunc-001/002` LIMIT 截断 | >500 截断（HTTP 网关不设 DGW_SQL_LIMIT，走 §4.9 默认值路径）+ >5000 硬上限（stdio 限 5000）+ truncated 标记 + 有界查询 psql 对照；配置 5001 拒启 |
 | `conc-001/002` 并发超限 | 同 key >2 / 进程级 >8 → `rate_limited`（key/process_concurrency_limit），不排队快速失败（`reject_within_ms` 断言被拒调用毫秒级返回；慢查询持闸 2s 保证窗口内确定性） |
@@ -81,12 +82,12 @@ stdio = 单 key 单进程（`serve-stdio` 的架构约束）：多身份用例�
 
 ## 主用例与 13 服务矩阵（build 14）
 
-- 主用例「昨天支付失败率为什么上涨」= cases.yaml `main-001`（5 步流程，
+- 主用例「昨天支付失败率为什么上涨」= cases.yaml `main-001`（6 步流程，
   详见 docs/acceptance-cases.md §1）；
 - 13 服务矩阵 = 10 个持库服务 × 3 条 execute_sql 用例 + 3 个无持库服务
   × 3 条语义元数据用例（服务实体可达 + 拓扑如实，口径见清单 §2.3）；
 - 复杂用例覆盖校验层硬路径：CTE/子查询的 AST 分类与授权展开
-  （bill-003 / audit-003 / main-001 步骤 5 等）；
+  （bill-003 / audit-003 / main-001 步骤 6 等）；
 - 全部成功 SQL 用例 `psql_compare: true`（三件套 (a) 数字一致）。
 
 ## 方案取舍（为何不是其他形态）
