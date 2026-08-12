@@ -19,7 +19,9 @@
 -- （bill/wallet/bss_invoice/subscription/promotion）provisioning 只授
 -- 同名 schema 前缀（生产形态），public 由 run.sh 逐库补授。独立执行：
 --   docker compose -f ../demo/docker-compose.pg.yml -p dgw-accept \
---     exec -T pg-primary psql -U postgres -v ON_ERROR_STOP=1 -d postgres -f /path/fixture.sql
+--     cp fixture.sql pg-primary:/tmp/fixture.sql
+--   docker compose -f ../demo/docker-compose.pg.yml -p dgw-accept \
+--     exec -T pg-primary psql -U postgres -v ON_ERROR_STOP=1 -d postgres -f /tmp/fixture.sql
 \set ON_ERROR_STOP on
 
 -- ══ bss-bill（db=bill；矩阵用例 bill-001/002/003）══════════════════════════
@@ -165,7 +167,7 @@ CREATE TABLE wallet_transactions (
 INSERT INTO wallet_transactions (id, transaction_id, org_id, tx_type, amount, balance_after, created_at)
 SELECT g, 'tx-' || g, 'org-' || (g % 20 + 1), (g % 5) + 1,
   ((g % 100) * 1.5)::numeric(12,2), (g * 10)::numeric(14,2),
-  now() - make_interval(days => g % 7, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 7) + make_interval(mins => g % 1440)
 FROM generate_series(1, 300) g;
 
 -- 退款单（wallet-003 复杂：join payment_orders 退款归因；neg-005 无指标
@@ -183,7 +185,7 @@ INSERT INTO refund_orders (id, refund_id, org_id, payment_order_id, amount, stat
 SELECT g, 'rf-' || g, 'org-' || (g % 20 + 1), 'po-' || (g * 3),
   (g * 0.5)::numeric(12,2),
   CASE g % 3 WHEN 0 THEN 5 WHEN 1 THEN 6 ELSE 7 END,
-  now() - make_interval(days => g % 7, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 7) + make_interval(mins => g % 1440)
 FROM generate_series(1, 90) g;
 
 -- ══ bss-invoice（db=bss_invoice；矩阵 invoice-001/002/003）════════════════
@@ -202,7 +204,7 @@ SELECT 'app-' || g, 'org-' || (g % 20 + 1),
   CASE g % 3 WHEN 0 THEN 'issued' WHEN 1 THEN 'in_progress' ELSE 'failed' END,
   CASE g % 2 WHEN 0 THEN 'normal' ELSE 'special' END,
   (g * 0.8)::numeric(12,2),
-  now() - make_interval(days => g % 14, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 14) + make_interval(mins => g % 1440)
 FROM generate_series(1, 150) g;
 
 -- 税务发票（invoice-003 三表 join 的开票链路）
@@ -252,7 +254,7 @@ CREATE TABLE model_pricing (
 INSERT INTO model_pricing (id, model, meter, amount, unit_type, currency, effective_from)
 SELECT g, CASE g % 3 WHEN 0 THEN 'qianshi' WHEN 1 THEN 'kimi-k2.5' ELSE 'qianshi' END,
   (g % 4) + 1, ((g % 100) * 0.001)::numeric(20,8), 'token', 'CNY',
-  now() - make_interval(days => g % 30, hours => g % 24)
+  date_trunc('day', now()) - make_interval(days => g % 30) + make_interval(hours => g % 24)
 FROM generate_series(1, 180) g;
 
 -- 档位策略版本 + 明细（sub-003 复杂：join 的档位阈值×版本）
@@ -330,7 +332,7 @@ CREATE TABLE code_redemptions (
 INSERT INTO code_redemptions (redemption_id, campaign_id, code_id, org_id, status, created_at)
 SELECT 'rd-' || g, 'camp-1', 'code-' || (g % 240 + 1), 'org-' || (g % 20 + 1),
   CASE g % 5 WHEN 0 THEN 'failed' WHEN 1 THEN 'processing' ELSE 'succeeded' END,
-  now() - make_interval(days => g % 7, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 7) + make_interval(mins => g % 1440)
 FROM generate_series(1, 180) g;
 
 -- ══ iam（db=iam；矩阵 iam-001/002/003）════════════════════════════════════
@@ -349,7 +351,7 @@ SELECT 'org-' || g, '组织' || g,
   CASE g % 4 WHEN 0 THEN 'active' WHEN 1 THEN 'frozen' WHEN 2 THEN 'active' ELSE 'cancelling' END,
   CASE g % 2 WHEN 0 THEN 'individual' ELSE 'team' END,
   'user-' || (g % 10 + 1),
-  now() - make_interval(days => g % 30, mins => g)
+  date_trunc('day', now()) - make_interval(days => g % 30) + make_interval(mins => g)
 FROM generate_series(1, 40) g;
 
 -- 组织成员（iam-003 复杂：join organizations 的类型×成员数）
@@ -363,13 +365,14 @@ CREATE TABLE organization_memberships (
 );
 INSERT INTO organization_memberships (id, organization_id, user_id, role_id, status, joined_at)
 SELECT g, 'org-' || (g % 40 + 1), 'user-' || (g % 30 + 1), (g % 5) + 1, 'active',
-  now() - make_interval(days => g % 10, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 10) + make_interval(mins => g % 1440)
 FROM generate_series(1, 200) g;
 
 -- ══ iam-audit（db=iam_audit；矩阵 audit-001/002/003）══════════════════════
 \c iam_audit
 -- 审计日志（audit-001/003：事件类型聚合 + 子查询/窗口函数；700 行，event_type
--- 4 值循环、近 1 日窗口恰含 bill.view + user.login_failed 两值）
+-- 4 值循环；近 1 日窗口恰含 wallet.recharge + org.update 两值——日边界
+-- 锚定后 1 日窗 = g%14=1 的行，g%4 交替 → 两值，与运行时刻无关）
 CREATE TABLE audit_logs (
   event_id varchar(64) PRIMARY KEY,
   event_type varchar(128) NOT NULL,
@@ -391,7 +394,7 @@ SELECT 'evt-' || g,
   'actor-' || (g % 20), 'org-' || (g % 20 + 1),
   CASE g % 4 WHEN 0 THEN 'user' WHEN 1 THEN 'wallet' WHEN 2 THEN 'bill' ELSE 'org' END,
   'res-' || (g % 50), CASE g % 5 WHEN 0 THEN 'failed' ELSE 'succeeded' END, 'ACTIVE',
-  now() - make_interval(days => g % 14, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 14) + make_interval(mins => g % 1440)
 FROM generate_series(1, 700) g;
 
 -- 审计导出（audit-002 枚举状态聚合）
@@ -429,7 +432,7 @@ SELECT 'appr-' || g, 'tpl-' || (g % 3 + 1), 'refund',
   CASE g % 2 WHEN 0 THEN 'refund' ELSE 'voucher' END, 'biz-' || g, 'org-' || (g % 20 + 1),
   CASE g % 3 WHEN 0 THEN 'approved' WHEN 1 THEN 'processing' ELSE 'rejected' END,
   CASE g % 3 WHEN 0 THEN 'succeeded' WHEN 1 THEN 'running' ELSE 'failed' END,
-  now() - make_interval(days => g % 14, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 14) + make_interval(mins => g % 1440)
 FROM generate_series(1, 120) g;
 
 -- 组织分组 + 成员（console-003 复杂：join 的组×成员数）
@@ -451,7 +454,7 @@ CREATE TABLE org_group_members (
 INSERT INTO org_group_members (id, group_id, org_id, org_type, joined_at)
 SELECT g, 'grp-' || (g % 5 + 1), 'org-' || (g % 20 + 1),
   CASE g % 2 WHEN 0 THEN 'individual' ELSE 'team' END,
-  now() - make_interval(days => g % 30, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 30) + make_interval(mins => g % 1440)
 FROM generate_series(1, 100) g;
 
 -- ══ notification（db=notification；矩阵 notif-001/002/003）════════════════
@@ -476,7 +479,7 @@ SELECT 'dlv-' || g, CASE g % 3 WHEN 0 THEN 'bss-bill' WHEN 1 THEN 'iam' ELSE 'co
   CASE g % 4 WHEN 0 THEN 'succeeded' WHEN 1 THEN 'failed' WHEN 2 THEN 'sending' ELSE 'pending' END,
   g % 3,
   CASE WHEN g % 4 = 0 THEN now() - make_interval(hours => g % 24) ELSE NULL END,
-  now() - make_interval(days => g % 7, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 7) + make_interval(mins => g % 1440)
 FROM generate_series(1, 200) g;
 
 -- 投递尝试（notif-003 复杂：LEFT JOIN 的失败率归因）
@@ -525,5 +528,5 @@ INSERT INTO support_tickets (id, source_id, ticket_ref, user_id, org_id, title, 
 SELECT g, (g % 3) + 1, 'TK-' || g, 'user-' || (g % 30 + 1), 'org-' || (g % 20 + 1),
   '工单' || g, CASE g % 3 WHEN 0 THEN 'billing' WHEN 1 THEN 'technical' ELSE 'account' END,
   CASE g % 4 WHEN 0 THEN 'closed' WHEN 1 THEN 'processing' WHEN 2 THEN 'replied' ELSE 'submitted' END,
-  now() - make_interval(days => g % 14, mins => g % 1440)
+  date_trunc('day', now()) - make_interval(days => g % 14) + make_interval(mins => g % 1440)
 FROM generate_series(1, 160) g;

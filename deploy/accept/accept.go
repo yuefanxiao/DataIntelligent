@@ -1124,11 +1124,10 @@ func compareCell(colType, psql string, gw any) string {
 		}
 		return ""
 	case "date":
-		// PG date 无时区：psql 渲染 YYYY-MM-DD，网关 pgx 解码为 time.Time
-		// → JSON RFC3339。验收环境 PG 会话时区 = UTC（postgres:17 默认），
-		// 两侧均为 UTC 午夜 → 即时点比较等价于日历日比较；非 UTC 会话的
-		// 渲染（如 +08:00 → 前一日 16:00Z）无法无歧义还原 date 语义
-		// （与 date '08-03' 的渲染不可区分）——矩阵的按天聚合用例
+		// PG date 无时区：psql 渲染 YYYY-MM-DD；网关侧 pgx v5 把 date 解码
+		// 为 time.Time 时无条件用 UTC 午夜（pgtype date 固定 UTC，与会话
+		// 时区无关）→ JSON RFC3339（YYYY-MM-DDT00:00:00Z）。两侧均为
+		// UTC 午夜即时点比较，等价日历日比较。矩阵的按天聚合用例
 		// date_trunc('day', …)::date 全走此类型。
 		gs, ok := gw.(string)
 		if !ok {

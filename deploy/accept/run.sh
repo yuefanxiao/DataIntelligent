@@ -152,7 +152,10 @@ KEY_P4="$(create_key p4)"; KEY_P5="$(create_key p5)"
 # 语义数据同步进运行时（build 14）：主用例检索/口径 dry-run 依赖
 # samples/semantic（13 服务 + payment_failure_rate 指标 + 概念）。先于
 # 授权——grant-add 的残留授权告警依赖语义库已同步（warnStaleGrants）。
-# 无 DGW_OPENAI_API_KEY → 向量通道不配置，检索 = 纯关键词（确定性）。
+# 检索确定性前提 = 无向量通道：unset DGW_OPENAI_API_KEY 密闭验收环境
+# （运行者 shell 导出的 key 会使 search_entities 开向量通道，命中数断言
+# 被向量额外命中破坏——README 已记录该前提，这里在脚本层强制）。
+unset DGW_OPENAI_API_KEY DGW_EMBEDDING_MODEL
 "$DGWBIN" semantic-sync --dir "$(cd ../.. && pwd)/samples/semantic" --db "$TMP/dgw.db" >/dev/null
 echo "    语义数据已同步（samples/semantic → 运行时存储）"
 "$DGWBIN" grant-add --user dev-alice --table bss-bill.bill.orders --db "$TMP/dgw.db" >/dev/null
@@ -179,6 +182,10 @@ done
 for u in p1 p2 p3 p4 p5; do
   "$DGWBIN" grant-add --user "$u" --table bss-bill.bill.orders --db "$TMP/dgw.db" >/dev/null
 done
+# 授权列表与 fixture 建表数自检（防漂移：新表漏授权 = 用例 permission_denied
+# 但错误可能被误读为用例问题；计数不符 = 显式失败，错误响亮）
+[ "$(grep -c '^CREATE TABLE' fixture.sql)" -eq 27 ] \
+  || { echo "fixture 建表数（$(grep -c '^CREATE TABLE' fixture.sql)）与授权列表（27）不一致" >&2; exit 1; }
 echo "    用户：dev-alice（主 + 矩阵 27 表）/ ghost（无 grants）/ p1-p5（并发探测）"
 KEYS="dev-alice=$KEY_MAIN,ghost=$KEY_GHOST,p1=$KEY_P1,p2=$KEY_P2,p3=$KEY_P3,p4=$KEY_P4,p5=$KEY_P5"
 
