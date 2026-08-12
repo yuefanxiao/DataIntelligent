@@ -1,7 +1,7 @@
 # v1 build 14 — 主用例 + 每服务用例矩阵 + 全量验收
 
 GitHub: https://github.com/yuefanxiao/DataIntelligent/issues/31
-Status: closed（PR #45 合入 main，2026-08-12 关闭，COMPLETED）
+Status: closed（PR #45 合入 main + PR #46 收敛轮 2 补充合入，2026-08-12 关闭，COMPLETED）
 
 ## 来源
 
@@ -39,21 +39,35 @@ docs/spec.md §6.1/§6.2/§6.5；issue #15
    锚定——行桶与运行时刻无关，全天稳定）；表建 public schema（FQN 服务.
    库.表，ADR-0011 记录）。
 4. **run.sh 扩展**：10 库路由、fixture、semantic-sync（samples/semantic →
-   运行时）、bss 域 public 补授、27 表授权 + 计数自检、DGW_OPENAI_API_KEY
-   密闭（检索确定性）。
+   运行时）、bss 域 public 补授、27 表授权 + 表名级自检（fixture 每张表
+   必须有授权 FQN 后缀，防漂移 fail fast）、DGW_OPENAI_API_KEY 密闭（检索
+   确定性）。
 5. **neg-005 换域**：验收环境带语义数据后「支付失败」已是指标——换「退款
    域无指标」fixture（搜索零命中 → 直查 refund_orders 成功）。
-6. **accept.go**：date 类型 psql 对照归一化（pgx 固定 UTC 解码 → RFC3339
+6. **neg-006（收敛轮 2 新增）授权展开负向**：CTE 引用未授权表（iam.users）
+   → not_granted——多表引用逐表展开、非只查首表（校验层硬路径的安全方向
+   回归；授权若退化为只查首表，本用例立即从 not_granted 变成功暴露）。
+7. **拓扑断言闭环（收敛轮 2）**：dash-003/ops-003/usage-003 补 `edges`
+   空数组断言——仅 nodes[0].fqn 验不出「无 contains 边」（遍历节点按 FQN
+   排序，起点恒排首位）；accept.go eqValue 新增数组分支 + 单测。
+8. **accept.go**：date 类型 psql 对照归一化（pgx 固定 UTC 解码 → RFC3339
    vs psql YYYY-MM-DD）+ 单测。
-7. **文档**：docs/acceptance-cases.md（用例清单 + golden 语料契约）、
-   ADR-0011（四决策）、README 更新。
-8. **评审**：code-review 两轴 + code-review-adversarial 4 角色（P1 时刻
-   漂移经日边界锚定修复，UTC 失败窗口复跑验证）。
+9. **文档**：docs/acceptance-cases.md（用例清单 + golden 语料契约——复用
+   前提如实化：execute_sql 断言依赖 fixture+语义环境）、ADR-0011（四决策）、
+   README 更新（主用例 6 步、用例 53 条 = 主用例 1 + 矩阵 39 + 负向 6 +
+   边界 4 + 正向基础 3）。
+10. **评审**：code-review 两轴 + code-review-adversarial 4 角色（P1 时刻
+   漂移经日边界锚定修复：audit-001 白天约 12 小时必挂 / wallet-003 UTC
+   00:07-01:27 只返回 1 行——此前绿跑全落在 UTC 23:39-23:59 幸运窗口；
+   修复后数学模拟 1440 运行时刻 × 22 项断言全恒定 + UTC 失败窗口实测
+   复跑验证）。
 
 ## 验证
 
 - 全量验收多次复跑全过（含 UTC 00:17-00:2x 原必失败窗口）：HTTP/stdio
-  双形态 66 项断言全过、37/37 psql 对照一致、重放复现通过、报告留档
+  双形态全过、37/37 psql 对照一致、重放复现通过、permission_denied=4
+  （预期 4，neg-001a/b/c + neg-006 精确计数）、报告留档
   deploy/accept/reports/
 - go test 全量 14 包全绿
-- 用例行数断言全天稳定（日边界锚定，与运行时刻无关）
+- 用例行数断言全天稳定（日边界锚定，与运行时刻无关）：1440 运行时刻
+  数学模拟 22 项断言全恒定 + 实跑验证
