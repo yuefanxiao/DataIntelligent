@@ -107,19 +107,20 @@ psql_pri -d iam -c "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" >/dev/nul
 # 13 服务用例矩阵 fixture（build 14）：10 个持库的真实表名 + 确定性数据
 # （全部相对 now() 的时间偏移——重放同日可复现）。表建在 public schema
 # （与 orders/big_events 同构；FQN 映射服务.库.表，docs/acceptance-cases.md
-# 记录形态约定）。先于 provisioning 执行——GRANT SELECT ON ALL TABLES
-# IN SCHEMA public 一次性覆盖全部 fixture 表，无需逐表补授。
+# 记录形态约定）。先于 provisioning 执行——非 bss 库的 public 由其
+# ALL TABLES 覆盖，bss 域库的 public 由下方循环补授（见 provisioning 注释）。
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" cp fixture.sql pg-primary:/tmp/fixture.sql
 psql_pri -d postgres -v ON_ERROR_STOP=1 -f /tmp/fixture.sql >/dev/null
 echo "    fixture 完成：13 服务矩阵表 + 确定性数据（10 库）"
 # 真实 provisioning（可重放；ro_password 必填）——按生产形态（schema 前缀）
-# 授 SELECT；demo/fixture 表在 public，provisioning 的 ALL TABLES 已覆盖
+# 授 SELECT；非 bss 库的 demo/fixture 表（public）由其 ALL TABLES 覆盖
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" cp "$(cd ../provisioning && pwd)/readonly-role.sql" pg-primary:/tmp/readonly-role.sql
 docker compose -f "$PG_COMPOSE_ABS" -p "$PROJ" exec -T pg-primary sh -c \
   "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v ro_password=demo-ro-pass -f /tmp/readonly-role.sql"
 # bss 域 provisioning 只授同名 schema 前缀（生产形态：bill/wallet/…）；
 # demo + fixture 表在 public schema——逐库补授 public（含 orders/big_events，
-# 与「demo 表在 public，之后补授」同构）。
+# 与「demo 表在 public，之后补授」同构；非 bss 库由 provisioning 的
+# ALL TABLES 覆盖，无需补授）。
 for db in bill wallet bss_invoice subscription promotion; do
   psql_pri -d "$db" -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO dgw_reader" >/dev/null
 done

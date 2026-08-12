@@ -23,8 +23,8 @@ cd deploy/accept
    镜像拉不下来时 `DGW_PG_REGISTRY=docker.1ms.run/library ./run.sh`）
 2. 建 10 个持库 + 演示数据（orders 600 / big_events 6000 / iam.users）+
    矩阵 fixture（fixture.sql：13 服务矩阵用例的表与确定性数据）+ 真实
-   provisioning（`deploy/provisioning/readonly-role.sql`，共享只读角色，
-   `GRANT SELECT ON ALL TABLES` 一次覆盖 fixture 表）
+   provisioning（`deploy/provisioning/readonly-role.sql`，共享只读角色；
+   非 bss 库 public 由 provisioning 覆盖，bss 域库 public 由 run.sh 补授）
 3. 凭据/授权：dev-alice（主用户 + 矩阵 27 表）/ ghost（无 grants）/ p1-p5
    （并发探测）；语义数据同步（semantic-sync samples/semantic → 运行时；
    主用例检索/口径 dry-run 依赖；无向量通道 = 纯关键词检索，确定性）
@@ -101,7 +101,7 @@ transport 三行样板，不抽公共包——demo 与验收是不同目录的�
 
 ## 加用例（build 14 矩阵已落地）
 
-编辑 `cases.yaml` 增条目即可，harness 不改。字段见文件头注释；要点：
+编辑 `cases.yaml` 增条目即可，harness 不用动。字段见文件头注释；要点：
 
 - `modes: [http, stdio]` 双形态 / `[http]` 仅 HTTP；
 - execute_sql 成功用例加 `psql_compare: true` 自动对照；

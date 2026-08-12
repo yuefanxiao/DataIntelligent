@@ -8,15 +8,16 @@ HTTP + stdio 双形态真实往返）；数据 = `deploy/accept/fixture.sql`（1
 
 ## 1. 主用例（§6.1）：昨天支付失败率为什么上涨
 
-Agent 自由组合工具（不预设 SQL），5 步全流程：
+Agent 自由组合工具（不预设 SQL），6 步全流程：
 
 | 步 | 工具 | 动作 | 断言 |
 |---|---|---|---|
 | 1 | search_entities | `"支付失败"` 双入口定位 | total=2（概念 + 指标都命中） |
-| 2 | search_entities | `"支付失败"` type=metric 单入口 | total=1，hits[0].fqn=payment_failure_rate |
-| 3 | get_metric_definition | 取口径 + 带时间参数 dry-run 展开 | time_applied=true，tables=[payment_orders]，dry_run_sql 全文精确断言 |
-| 4 | execute_sql | 昨日趋势（近 7 日逐日失败率） | 7 行 + psql 对照 |
-| 5 | execute_sql | 下钻归因（CTE + 多表 join + 窗口函数 + 时间窗口） | 8 行 + psql 对照 |
+| 2 | search_entities | `"支付失败"` type=concept 概念入口 | total=1，hits[0].fqn=payment_failure |
+| 3 | search_entities | `"支付失败"` type=metric 指标入口 | total=1，hits[0].fqn=payment_failure_rate |
+| 4 | get_metric_definition | 取口径 + 带时间参数 dry-run 展开 | time_applied=true，tables=[payment_orders]，dry_run_sql 全文精确断言 |
+| 5 | execute_sql | 昨日趋势（近 7 日逐日失败率） | 7 行 + psql 对照 |
+| 6 | execute_sql | 下钻归因（CTE + 多表 join + 窗口函数 + 时间窗口） | 8 行 + psql 对照 |
 
 - **数据故事**（fixture.sql）：此前 13 天失败率 3/60 = 5%，昨日 43/100 =
   43% 激增，失败集中于昨日 channel=5（银行转账）——归因查询里该渠道
@@ -27,7 +28,7 @@ Agent 自由组合工具（不预设 SQL），5 步全流程：
 - **趋势/归因 SQL 用相对时间窗口**（昨天 = `date_trunc('day', now()) -
   interval '1 day'`）：重放同日可复现；fixture 数据随 now() 前移，跨天
   重跑自动对齐。
-- 判定三件套：步骤 4/5 走 psql_compare（(a)）；全部调用落执行记录并重放
+- 判定三件套：步骤 5/6 走 psql_compare（(a)）；全部调用落执行记录并重放
   复现（(b)）；全程零未授权（(c)）。
 
 ## 2. 每服务用例矩阵（§6.2）：13 服务 × ≥2 简单 + ≥1 复杂
@@ -39,7 +40,7 @@ Agent 自由组合工具（不预设 SQL），5 步全流程：
 | bss-bill | bill | 账单时间窗口聚合 / 结算批次枚举聚合 | 结算扣费失败归因（CTE + LEFT JOIN） | bill-001/002/003 |
 | bss-wallet | wallet | 支付单枚举过滤 / 流水 tx_type 聚合 | 退款归因（退款单 JOIN 支付单） | wallet-001/002/003 |
 | bss-invoice | bss_invoice | 申请枚举聚合 / 申请时间窗口 | 开票链路（申请 LEFT JOIN 发票 LEFT JOIN 文件） | invoice-001/002/003 |
-| bss-subscription | subscription | 定价模型×计量项聚合 / 30 日定价计数 | 档位策略（明细 JOIN 版本） | sub-001/002/003 |
+| bss-subscription | subscription | 定价模型×计量项聚合 / 30 日定价计数 | 档位策略（明细 JOIN 版本 + 窗口函数） | sub-001/002/003 |
 | bss-promotion | promotion | 兑换记录枚举聚合 / 兑换码枚举聚合 | 兑换失败归因（记录 JOIN 码 JOIN 批次） | promo-001/002/003 |
 | iam | iam | 组织枚举聚合 / 组织时间窗口 | 组织成员归因（成员 JOIN 组织） | iam-001/002/003 |
 | iam-audit | iam_audit | 近 1 日事件类型聚合 / 导出枚举聚合 | 审计量趋势（子查询 + 窗口函数 lag） | audit-001/002/003 |
@@ -59,8 +60,8 @@ Agent 自由组合工具（不预设 SQL），5 步全流程：
 - 简单 = 单表 / 时间窗口过滤 / 枚举状态过滤 / 聚合；复杂 = 核心链路
   多表 join + 聚合 + 时间窗口/窗口函数。
 - **校验层硬路径覆盖**（复杂用例的子集）：CTE 的 AST 分类与授权展开 =
-  bill-003、main-001 步骤 5；子查询的表提取与授权展开 = audit-003、
-  main-001 步骤 5；LEFT JOIN 三表提取 = invoice-003、promo-003、notif-003。
+  bill-003、main-001 步骤 6；子查询的表提取与授权展开 = audit-003；
+  LEFT JOIN 三表提取 = invoice-003、promo-003、notif-003。
 
 ### 2.3 无持库服务的用例口径
 
@@ -95,8 +96,11 @@ dashboard-backend / ops-operation / usage-collection 是聚合网关/编排/采�
   可复现；窗口查询统一 `[date_trunc('day', now()) - N day, date_trunc('day', now()))`
   半开区间（排除今日，跨天重跑窗口自动前移）。
 - **授权**：run.sh 对 fixture 表逐表 `grant-add`（服务.库.表 FQN 与语义
-  数据一致）；PG 侧由 provisioning 的 `GRANT SELECT ON ALL TABLES IN
-  SCHEMA public` 一次性覆盖（fixture 先于 provisioning 执行）。
+  数据一致）；PG 侧：非 bss 库（iam/iam_audit/console/notification/
+  ops_ticket）的 public 由 provisioning 的 `GRANT SELECT ON ALL TABLES
+  IN SCHEMA public` 覆盖，bss 域库（bill/wallet/bss_invoice/
+  subscription/promotion）的 public 由 run.sh 逐库补授（provisioning
+  只授同名 schema 前缀，生产形态）。
 - **规模**：27 张新表（bill 3 / wallet 4 / bss_invoice 3 / subscription 3 /
   promotion 3 / iam 2 / iam_audit 2 / console 3 / notification 2 /
   ops_ticket 2），单表几十到几百行，全量验收分钟级完成。

@@ -1124,22 +1124,28 @@ func compareCell(colType, psql string, gw any) string {
 		}
 		return ""
 	case "date":
-		// psql 渲染 YYYY-MM-DD；网关 pgx 把 PG date 解码为 time.Time → JSON
-		// RFC3339（YYYY-MM-DDTHH:MM:SSZ）。归一化到日历日比较（矩阵的按天
-		// 聚合用例 date_trunc('day', …)::date 全走此类型）。
+		// PG date 无时区：psql 渲染 YYYY-MM-DD，网关 pgx 解码为 time.Time
+		// → JSON RFC3339。验收环境 PG 会话时区 = UTC（postgres:17 默认），
+		// 两侧均为 UTC 午夜 → 即时点比较等价于日历日比较；非 UTC 会话的
+		// 渲染（如 +08:00 → 前一日 16:00Z）无法无歧义还原 date 语义
+		// （与 date '08-03' 的渲染不可区分）——矩阵的按天聚合用例
+		// date_trunc('day', …)::date 全走此类型。
 		gs, ok := gw.(string)
 		if !ok {
 			return "date 网关值非文本"
 		}
 		pt, err1 := time.Parse("2006-01-02", psql)
 		gt, err2 := time.Parse(time.RFC3339, gs)
-		if err1 == nil && err2 == nil && pt.Equal(gt) {
-			return ""
-		}
 		if err1 != nil {
 			return "date psql 解析失败: " + psql
 		}
-		return "date 不一致"
+		if err2 != nil {
+			return "date 网关解析失败: " + gs
+		}
+		if !pt.Equal(gt) {
+			return "date 不一致"
+		}
+		return ""
 	case "timestamp", "time", "timetz", "interval":
 		gs, ok := gw.(string)
 		if !ok || gs != psql {

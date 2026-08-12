@@ -71,12 +71,13 @@ cases:
       psql_compare: true
 
   # ── §6.1 主用例「昨天支付失败率为什么上涨」全流程（build 14）──────────
-  # Agent 自由组合（不预设 SQL）：双入口定位 → 口径 + 带时间参数 dry-run
-  # 展开 → 昨日趋势 → 下钻归因（多表 join + 窗口函数 + 时间窗口 + CTE，
-  # 覆盖校验层硬路径）。
+  # Agent 自由组合（不预设 SQL）：双入口定位（概念入口 + 指标入口都按
+  # FQN 断言）→ 口径 + 带时间参数 dry-run 展开 → 昨日趋势 → 下钻归因
+  # （多表 join + 窗口函数 + 时间窗口 + CTE，覆盖校验层硬路径）。
   # 数据故事（fixture.sql）：此前 13 天失败率 3/60 = 5%，昨日 43/100 =
-  # 43% 激增——失败集中 channel=5 银行转账。趋势/归因 SQL 用相对时间窗口
-  # （昨天 = date_trunc('day', now()) - interval '1 day'），重放同日可复现。
+  # 43% 激增——失败集中 channel=5 银行转账（下钻里该渠道 failed 3 → 40，
+  # delta=37）。趋势/归因 SQL 用相对时间窗口（昨天 = date_trunc('day',
+  # now()) - interval '1 day'），重放同日可复现。
   # dry-run 断言用固定窗口（2026-08-11T00:00:00Z → 08-12）：展开是纯函数，
   # 固定入参 = 确定性输出，精确断言展开 SQL 全文（口径改动即用例失败）。
   - id: main-001
@@ -92,6 +93,17 @@ cases:
           paths:
             - path: total
               eq: 2
+      - tool: search_entities
+        args:
+          query: "支付失败"
+          type: concept
+        expect:
+          status: success
+          paths:
+            - path: total
+              eq: 1
+            - path: hits[0].fqn
+              eq: payment_failure
       - tool: search_entities
         args:
           query: "支付失败"
@@ -141,8 +153,8 @@ cases:
   # 10 个持库服务 = execute_sql 用例（fixture.sql 伪造数据）；3 个无持库
   # 服务（聚合/编排/采集角色）= 语义元数据用例（服务实体可达 + 拓扑如
   # 实，docs/acceptance-cases.md 记录口径）。全部复杂用例 = 多表 join/
-  # 窗口函数/时间窗口，并覆盖校验层硬路径（子查询/CTE 的 AST 分类与
-  # 授权展开：bill-003/main-001 用 CTE，audit-003/main-001 用子查询）。
+  # 窗口函数/时间窗口，并覆盖校验层硬路径（AST 分类与授权展开）：
+  # CTE = bill-003 / main-001 步骤 6；子查询 = audit-003。
   #
   # ── bss-bill（db=bill）────────────────────────────────────────────────
   - id: bill-001
@@ -295,16 +307,16 @@ cases:
       truncated: false
       psql_compare: true
   - id: sub-003
-    name: bss-subscription 复杂——档位策略（明细 JOIN 版本 + 聚合）
+    name: bss-subscription 复杂——档位策略（明细 JOIN 版本 + 聚合 + 窗口函数）
     modes: [http, stdio]
     tool: execute_sql
     key: dev-alice
     args:
-      sql: "SELECT v.version, count(*) AS items, max(i.required_score) AS max_score FROM tier_policy_items i JOIN tier_policy_versions v ON i.policy_version_id = v.id GROUP BY v.version ORDER BY v.version"
+      sql: "SELECT v.version, i.tier_id, count(*) AS items, sum(sum(i.required_score)) OVER (PARTITION BY v.version) AS version_score FROM tier_policy_items i JOIN tier_policy_versions v ON i.policy_version_id = v.id GROUP BY v.version, i.tier_id ORDER BY v.version, i.tier_id"
       dbname: subscription
     expect:
       status: success
-      rows: 2
+      rows: 8
       truncated: false
       psql_compare: true
 

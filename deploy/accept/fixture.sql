@@ -13,9 +13,11 @@
 --   - 数据量小（几十到几百行）+ 枚举状态覆盖 + 每服务一个「昨日/近期」
 --     相对时间窗，行数断言可精确到个位。
 --
--- 由 run.sh 在主库执行（先于 provisioning——provisioning 的
--- GRANT SELECT ON ALL TABLES IN SCHEMA public 一次性覆盖全部 fixture
--- 表，无需逐表补授）。独立执行：
+-- 由 run.sh 在主库执行（先于 provisioning）：非 bss 库（iam/iam_audit/
+-- console/notification/ops_ticket）的 public 由 provisioning 的
+-- GRANT SELECT ON ALL TABLES IN SCHEMA public 一次性覆盖；bss 域库
+-- （bill/wallet/bss_invoice/subscription/promotion）provisioning 只授
+-- 同名 schema 前缀（生产形态），public 由 run.sh 逐库补授。独立执行：
 --   docker compose -f ../demo/docker-compose.pg.yml -p dgw-accept \
 --     exec -T pg-primary psql -U postgres -v ON_ERROR_STOP=1 -d postgres -f /path/fixture.sql
 \set ON_ERROR_STOP on
@@ -116,33 +118,38 @@ CREATE TABLE payment_orders (
   status smallint NOT NULL,
   created_at timestamptz NOT NULL
 );
--- day_ago：13..1 = 每日常规 60 笔（3 失败 / 57 成功）；1 = 昨日追加 100 笔
--- （40 失败全 channel=5）；0 = 今日 40 笔（2 失败）——窗口查询上界
--- date_trunc('day', now()) 排除今日。
+-- i = 日内位置（每日常规 0..59；昨日追加块 60..99；今日块 60..99）。
+-- day_ago：13..1 = 每日常规 60 笔（3 失败 / 57 成功）；1 = 昨日追加
+-- 40 笔（i>=60，全 channel=5 失败 → 昨日 100 笔 43 失败）；0 = 今日
+-- 40 笔（i=98..99 共 2 失败）——窗口查询上界 date_trunc('day', now())
+-- 排除今日。时间 = 当日零点 + i 分钟（加法不回退：今日块的行留在今日
+-- 桶，不会污染昨日窗口）。
 WITH s AS (
   SELECT g,
     CASE WHEN g <= 780 THEN 14 - ((g - 1) / 60 + 1)
-         WHEN g <= 880 THEN 1
+         WHEN g <= 820 THEN 1
          ELSE 0 END AS day_ago,
-    (g - 1) % 60 AS i
-  FROM generate_series(1, 920) g
+    CASE WHEN g <= 780 THEN (g - 1) % 60
+         WHEN g <= 820 THEN (g - 781) + 60
+         ELSE (g - 821) + 60 END AS i
+  FROM generate_series(1, 860) g
 )
 INSERT INTO payment_orders (id, order_id, org_id, requested_amount, paid_amount, channel, status, created_at)
 SELECT g, 'po-' || g, 'org-' || (g % 20 + 1),
   (i % 50 + 1)::numeric(12,2), (i % 50 + 1)::numeric(12,2),
   CASE
     WHEN day_ago = 1 AND i >= 60 THEN 5
-    WHEN day_ago = 0 AND i >= 38 THEN 4
+    WHEN day_ago = 0 AND i >= 98 THEN 4
     WHEN i % 20 = 0 THEN CASE day_ago % 3 WHEN 0 THEN 2 WHEN 1 THEN 4 ELSE 5 END
     ELSE (i % 2) * 2 + 2
   END AS channel,
   CASE
     WHEN day_ago = 1 AND i >= 60 THEN 4
-    WHEN day_ago = 0 AND i >= 38 THEN 4
+    WHEN day_ago = 0 AND i >= 98 THEN 4
     WHEN i % 20 = 0 THEN 4
     ELSE 2
   END AS status,
-  date_trunc('day', now()) - make_interval(days => day_ago, mins => i)
+  date_trunc('day', now()) - make_interval(days => day_ago) + make_interval(mins => i)
 FROM s;
 
 -- 钱包流水（wallet-002 聚合：tx_type 1..5 → 5 行）
@@ -272,8 +279,8 @@ CREATE TABLE tier_policy_items (
   concurrency int
 );
 INSERT INTO tier_policy_items (id, policy_version_id, tier_id, label, sort_order, is_floor, required_score, rpm, tpm, concurrency)
-SELECT g, (g % 2) + 1, 'tier-' || (g % 4), 'T' || (g % 4),
-  g % 4, (g % 4) = 0, (g % 100) * 10,
+SELECT g, (g % 2) + 1, 'tier-' || ((g / 2) % 4), 'T' || ((g / 2) % 4),
+  (g / 2) % 4, ((g / 2) % 4) = 0, (g % 100) * 10,
   (g % 50) + 10, (g % 500) + 100, (g % 10) + 1
 FROM generate_series(1, 40) g;
 
